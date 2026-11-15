@@ -1,99 +1,100 @@
-# Konzept: Phasen-basierter, verifiziert-paralleler OCI-Builder für bootc-Systeme
+# Concept: a phase-based, verified-parallel OCI builder for bootc systems
 
 **Name:** `nomira`
-**Status:** Entwurf v1 · 2026-11-14 — historischer Stand. Recipe-Schema (`# syntax`,
-`args`, `prepare`, String-Befehle) und Roadmap sind seitdem weiterentwickelt;
-maßgeblich ist das README.
+**Status:** draft v1 · 2026-11-14, kept as a historical record. The recipe
+schema (`# syntax`, `args`, `prepare`, string commands) and the roadmap have
+moved on since; the README is authoritative.
 
-## 1. Ziel
+## 1. Goal
 
-Ein deklaratives Build-Werkzeug für bootc-Systemimages (primär Arch Linux), das
-Build-Schritte in **Phasen** und **Gruppen** organisiert:
+A recipe-driven build tool for bootc system images (primarily Arch Linux) that
+organises build steps into **phases** and **groups**:
 
-- Phasen laufen **seriell** in deklarierter Reihenfolge.
-- Gruppen innerhalb einer Phase sind **deklariert unabhängig**: Sie werden als
-  Fan-out auf demselben Basiszustand parallel gebaut, einzeln gecacht und am
-  Phasenende zusammengeführt.
-- Die Unabhängigkeit wird **im Build verifiziert** (Write-Set-Disjunktheit).
-  Ein Konflikt bricht den Build ab, bevor gemergt oder exportiert wird.
+- Phases run **serially** in the declared order.
+- Groups within a phase are **declared independent**: they fan out from the
+  same base state, are built in parallel, cached one by one and merged at the
+  end of the phase.
+- The independence is **verified during the build** (disjoint write sets). A
+  conflict aborts the build before anything is merged or exported.
 
-Damit invalidiert die Änderung einer Gruppe nur deren eigenen Layer plus den
-billigen Merge und nachfolgende Phasen – nicht die Geschwistergruppen. Das
-überträgt Nix' Derivations-Granularität auf das Containerfile-Modell, ohne
-dessen Flexibilität (beliebiges Shell, Arch-Pakete) aufzugeben.
+A change to one group therefore invalidates only its own layer plus the cheap
+merge and the following phases, not its sibling groups. This brings the
+granularity of Nix derivations to the Containerfile model without giving up
+its flexibility (arbitrary shell, Arch packages).
 
-## 2. Scope und Nicht-Ziele
+## 2. Scope and non-goals
 
-**In Scope**
+**In scope**
 
-- Recipe-Format (YAML) → LLB-Graph → OCI-Image via BuildKit
-- Konfliktvalidierung mit konfigurierbarer Policy
-- Lieferung in podmans containers-storage und Übergabe an `bootc switch`
-- Reproduzierbarkeits-Pinning über Arch Linux Archive (Snapshot-Datum)
-- Post-Build-Gates (Hooks, bcvk-Boot-Test) im `switch`-Workflow
+- Recipe format (YAML) → LLB graph → OCI image via BuildKit
+- Conflict validation with a configurable policy
+- Delivery into podman's containers-storage and hand-over to `bootc switch`
+- Pinning for reproducibility through the Arch Linux Archive (snapshot date)
+- Post-build gates (hooks, bcvk boot test) in the `switch` workflow
 
-**Nicht-Ziele**
+**Non-goals**
 
-- Kein BlueBuild-Fork und keine Kompatibilität mit dessen Recipes/Modulen.
-  Gemeinsame Basis ist nur bootc; die Build-Schicht ist ein eigenständiges
-  Geschwisterprojekt.
-- Keine Fedora-/Distro-spezifischen Module in v1. Das Recipe ist
-  distro-agnostisch; Arch ist Referenz-Target.
-- Kein eigener Paketmanager, kein Konfigurations-Merging à la Nix-Module.
-- v1 ist kein `# syntax=`-Frontend (siehe Roadmap).
+- Not a BlueBuild fork and no compatibility with its recipes or modules. The
+  only common ground is bootc; the build layer is an independent sibling
+  project.
+- No Fedora- or distribution-specific modules in v1. The recipe is
+  distribution-agnostic; Arch is the reference target.
+- No package manager of its own, no configuration merging like Nix modules.
+- v1 is not a `# syntax=` frontend (see roadmap).
 
-## 3. Build-Modell
+## 3. Build model
 
-### 3.1 Struktur
+### 3.1 Structure
 
 ```
-Pipeline  = geordnete Liste von Phasen          (Liste → Reihenfolge zählt)
-Phase     = Menge unabhängiger Gruppen          (Mapping → Reihenfolge egal)
-Gruppe    = serielle Liste von Befehlen         (Liste → Reihenfolge zählt)
+Pipeline  = ordered list of phases              (list → order matters)
+Phase     = set of independent groups           (mapping → order irrelevant)
+Group     = serial list of commands             (list → order matters)
 ```
 
-Designprinzip: **Geordnetes ist Liste, Unabhängiges ist Mapping.** Die Syntax
-spiegelt die Semantik; eine Phase mit genau einer Gruppe ist der Serienfall
-(`base`, `finish`) ohne Sonderbehandlung.
+Design principle: **what is ordered is a list, what is independent is a
+mapping.** The syntax mirrors the semantics; a phase with exactly one group is
+the serial case (`base`, `finish`) without special treatment.
 
-### 3.2 Abbildung auf LLB
+### 3.2 Mapping to LLB
 
-Für eine Phase mit Eingangszustand `S` und Gruppen `g₁…gₙ`:
+For a phase with input state `S` and groups `g₁…gₙ`:
 
 ```
 S ──Exec/File(g₁)──→ R₁ ──DiffOp(S,R₁)──→ Δ₁   ┐
-S ──Exec/File(g₂)──→ R₂ ──DiffOp(S,R₂)──→ Δ₂   ├─ parallel, einzeln gecacht
+S ──Exec/File(g₂)──→ R₂ ──DiffOp(S,R₂)──→ Δ₂   ├─ parallel, cached one by one
 S ──Exec/File(gₙ)──→ Rₙ ──DiffOp(S,Rₙ)──→ Δₙ   ┘
-S' = MergeOp(S, Δ₁, …, Δₙ)        → Eingang der nächsten Phase
+S' = MergeOp(S, Δ₁, …, Δₙ)        → input of the next phase
 ```
 
-- Jede Gruppe läuft **auf `S`**, nie auf dem Ergebnis einer Geschwistergruppe.
-  Lese-Abhängigkeiten zwischen Gruppen sind damit konstruktiv ausgeschlossen
-  (sie schlagen deterministisch fehl, statt still zu funktionieren).
-- Befehle innerhalb einer Gruppe verketten sich seriell (ExecOp→ExecOp…),
-  `copy` wird FileOp.
-- Export: Jedes Δᵢ wird ein **eigener Image-Layer mit stabilem Digest**. Die
-  Diffs sind kein Begleitartefakt – der Merge der Diffs *ist* das Image.
-  Validierungsdaten (Write-Listen) landen nie im Export.
+- Every group runs **on `S`**, never on the result of a sibling group. Read
+  dependencies between groups are thereby ruled out by construction (they fail
+  deterministically instead of silently working).
+- Commands within a group chain serially (ExecOp→ExecOp…); `copy` becomes a
+  FileOp.
+- Export: every Δᵢ becomes **an image layer of its own with a stable digest**.
+  The diffs are not a by-product: the merge of the diffs *is* the image.
+  Validation data (write lists) never ends up in the export.
 
-### 3.3 Cache-Semantik
+### 3.3 Cache semantics
 
-- Änderung in Gruppe g → neu: Δ_g, MergeOp der Phase, alle Folgephasen.
-- Unverändert: alle Geschwister-Δ (aus Cache, Digests stabil).
-- MergeOp ist lazy/metadatenbasiert (overlay-artig), kein Kopieren.
+- A change in group g → rebuilt: Δ_g, the MergeOp of the phase, all following
+  phases.
+- Unchanged: all sibling Δ (from the cache, stable digests).
+- MergeOp is lazy and metadata-based (overlay-like), nothing is copied.
 
-## 4. Recipe-Schema v1
+## 4. Recipe schema v1
 
-### 4.1 Beispiel
+### 4.1 Example
 
 ```yaml
 version: 1
 
 settings:
-  name: meinsystem
-  base-image: ghcr.io/…/arch-bootc@sha256:…   # per Digest gepinnt
-  arch-snapshot: "2026/11/10"                 # Arch Linux Archive, s. §7
-  validation: strict                          # Datei-Default
+  name: mysystem
+  base-image: ghcr.io/…/arch-bootc@sha256:…   # pinned by digest
+  arch-snapshot: "2026/11/10"                 # Arch Linux Archive, see §7
+  validation: strict                          # file default
 
 phases:
   - name: base
@@ -102,8 +103,8 @@ phases:
         - run: pacman -Syu --needed --noconfirm kmscon networkmanager apparmor …
 
   - name: configs
-    validation: allow-identical               # Phase überschreibt Default
-    shared:                                   # Allowlist bewusst geteilter Pfade
+    validation: allow-identical               # a phase overrides the default
+    shared:                                   # allowlist of deliberately shared paths
       - /usr/lib/tmpfiles.d/common.conf
     groups:
       kmscon:
@@ -122,65 +123,64 @@ phases:
         - run: systemctl enable kmscon NetworkManager apparmor
 ```
 
-### 4.2 Felder
+### 4.2 Fields
 
-| Feld | Ebene | Bedeutung |
+| Field | Level | Meaning |
 |---|---|---|
-| `version` | Datei | Schema-Version, Pflicht |
-| `settings.name` | Datei | Image-Name (`localhost/<name>`) |
-| `settings.base-image` | Datei | Basis, Digest-Pinning empfohlen |
-| `settings.arch-snapshot` | Datei | Archive-Datum; leer = ungepinnt (Warnung) |
-| `settings.validation` | Datei | Default-Policy für alle Phasen |
-| `phases[].name` | Phase | Pflicht, eindeutig; erscheint in Logs/Fehlern |
-| `phases[].validation` | Phase | überschreibt Default |
-| `phases[].shared` | Phase | Pfad-Allowlist, von der Konfliktprüfung ausgenommen |
-| `phases[].groups.<name>` | Gruppe | Key = Gruppenname; Wert = Befehlsliste |
-| `- run:` | Befehl | Shell (`/bin/sh -c`), Blockskalar für Mehrzeiler |
-| `- copy: [src, dst]` | Befehl | aus dem Build-Kontext ins Image (FileOp) |
+| `version` | file | schema version, required |
+| `settings.name` | file | image name (`localhost/<name>`) |
+| `settings.base-image` | file | base; pinning by digest recommended |
+| `settings.arch-snapshot` | file | archive date; empty = unpinned (warning) |
+| `settings.validation` | file | default policy for all phases |
+| `phases[].name` | phase | required, unique; appears in logs and errors |
+| `phases[].validation` | phase | overrides the default |
+| `phases[].shared` | phase | path allowlist, exempt from the conflict check |
+| `phases[].groups.<name>` | group | key = group name; value = list of commands |
+| `- run:` | command | shell (`/bin/sh -c`), block scalar for several lines |
+| `- copy: [src, dst]` | command | from the build context into the image (FileOp) |
 
-Bewusst **nicht** vorgesehen: Validation auf Gruppenebene. Disjunktheit ist
-eine Eigenschaft von Gruppen-*Paaren* innerhalb einer Phase; eine Policy pro
-Gruppe wäre bei einem Konflikt zwischen zwei Gruppen mehrdeutig.
+Deliberately **not** provided: validation at group level. Disjointness is a
+property of *pairs* of groups within a phase; a per-group policy would be
+ambiguous when two groups conflict.
 
-Schema-Validierung (Struktur, unbekannte Keys, leere Phasen, doppelte
-Gruppennamen) läuft vollständig **vor** dem ersten Build-Schritt.
+Schema validation (structure, unknown keys, empty phases, duplicate group
+names) runs completely **before** the first build step.
 
-## 5. Konfliktvalidierung
+## 5. Conflict validation
 
-### 5.1 Write-Set-Erhebung
+### 5.1 Collecting the write set
 
-Pro Gruppe wird eine Write/Delete-Liste erhoben. Mechanik: ein internes ExecOp
-bekommt `S` und `Rᵢ` nebeneinander gemountet und emittiert die Liste als
-Datei, die das Frontend über die Gateway-API einliest. (Ein reines
-`ReadDir`-Wandern des Diffs zeigt Deletions nicht zuverlässig; daher der
-explizite Vergleichsschritt.) Die Listen existieren nur als Build-Referenzen
-und werden nie exportiert.
+A write/delete list is collected per group. Mechanism: an internal ExecOp gets
+`S` and `Rᵢ` mounted side by side and emits the list as a file, which the
+frontend reads through the gateway API. (Merely walking the diff with
+`ReadDir` does not show deletions reliably, hence the explicit comparison
+step.) The lists exist only as build references and are never exported.
 
-### 5.2 Regeln
+### 5.2 Rules
 
-- **Gemeinsame Verzeichnisse sind nie ein Fehler.** Konflikt besteht nur auf
-  Datei-Ebene (gleicher Pfad als Datei in ≥2 Gruppen).
-- **Typ-Konflikt ist ein Fehler:** Gruppe A legt Datei `/etc/foo` an, Gruppe B
-  das Verzeichnis `/etc/foo/`.
-- **Whiteouts mit Präfix-Semantik:** Löscht eine Gruppe `/etc/foo/`
-  (Verzeichnis-Whiteout), kollidiert das mit *jedem* Pfad unter `/etc/foo/`
-  in jeder anderen Gruppe – nicht nur mit exakt gleichen Pfaden. Datei-Löschung
-  kollidiert mit Schreiben desselben Pfads.
-- Metadaten-Änderungen (chmod/chown ohne Inhaltsänderung) zählen als Schreiben
-  des Pfads.
+- **Shared directories are never an error.** A conflict exists only at file
+  level (the same path as a file in two or more groups).
+- **A type conflict is an error:** group A creates the file `/etc/foo`, group
+  B the directory `/etc/foo/`.
+- **Whiteouts have prefix semantics:** if a group deletes `/etc/foo/`
+  (directory whiteout), this collides with *every* path below `/etc/foo/` in
+  every other group, not only with identical paths. Deleting a file collides
+  with writing the same path.
+- Metadata changes (chmod or chown without a content change) count as writing
+  the path.
 
 ### 5.3 Policies
 
-| Policy | Verhalten |
+| Policy | Behaviour |
 |---|---|
-| `strict` | jeder Datei-Konflikt ist ein Fehler |
-| `allow-identical` | gleicher Pfad erlaubt, wenn Inhalts-Hash identisch (Metadaten müssen ebenfalls übereinstimmen) |
-| + `shared:` | Allowlist pro Phase, von der Prüfung ausgenommen (gilt für beide Policies) |
+| `strict` | every file conflict is an error |
+| `allow-identical` | the same path is allowed if the content hash is identical (metadata must match as well) |
+| + `shared:` | allowlist per phase, exempt from the check (applies to both policies) |
 
-### 5.4 Fehlverhalten
+### 5.4 Failure behaviour
 
-Konflikt ⇒ **Build schlägt fehl**, vor MergeOp und Export. Fehlermeldung in
-Recipe-Begriffen:
+Conflict ⇒ **the build fails**, before MergeOp and export. The error message
+uses the terms of the recipe:
 
 ```
 error: phase "configs": groups "kmscon" and "boot" both write
@@ -188,100 +188,101 @@ error: phase "configs": groups "kmscon" and "boot" both write
   (policy: strict; add to phases[].shared to allow intentionally)
 ```
 
-Erwarteter, gewollter Effekt: Zwei Gruppen, die beide `pacman -S` ausführen,
-schreiben beide `/var/lib/pacman/local/…` und schlagen korrekt fehl –
-Paketinstallationen sind über die gemeinsame Pacman-DB nie unabhängig und
-gehören in eine serielle Phase (oder eine einzelne Gruppe).
+An expected and intended effect: two groups that both run `pacman -S` both
+write `/var/lib/pacman/local/…` and correctly fail. Package installations are
+never independent because of the shared pacman database and belong in a serial
+phase (or a single group).
 
-## 6. Architektur
+## 6. Architecture
 
-### 6.1 Sprache
+### 6.1 Language
 
-**Go.** BuildKits `client/llb`-DSL und die Gateway-API sind Go-Bibliotheken
-erster Klasse (inkl. MergeOp/DiffOp, Progress-UI, Solver-Client). Rust würde
-Nachbau des LLB-Protobuf und Gateway-gRPC erfordern; vorhandene Crates sind
-verwaist und stammen aus der Zeit vor MergeOp/DiffOp.
+**Go.** BuildKit's `client/llb` DSL and the gateway API are first-class Go
+libraries (including MergeOp/DiffOp, progress UI, solver client). Rust would
+mean rebuilding the LLB protobuf and the gateway gRPC; the existing crates are
+abandoned and predate MergeOp/DiffOp.
 
-### 6.2 Paketstruktur
+### 6.2 Package layout
 
 ```
-cmd/nomira/            CLI (cobra o. ä.)
-internal/recipe/       YAML-Parsing, Schema-Validierung, Typen
-internal/compile/      Recipe → LLB (Phasen/Gruppen → Exec/File/Diff/Merge)
-internal/conflict/     Write-Set-Erhebung + Disjunktheitsprüfung + Policies
-internal/engine/       buildkitd-Client: Solve, Progress, Export (oci-archive)
-internal/deliver/      containers-storage-Import, bootc-switch-Aufruf
-internal/gates/        Post-Build: Hook-Runner (validation.d/), bcvk-Gate
+cmd/nomira/            CLI (cobra or similar)
+internal/recipe/       YAML parsing, schema validation, types
+internal/compile/      recipe → LLB (phases/groups → Exec/File/Diff/Merge)
+internal/conflict/     write-set collection + disjointness check + policies
+internal/engine/       buildkitd client: solve, progress, export (oci-archive)
+internal/deliver/      containers-storage import, bootc switch call
+internal/gates/        post-build: hook runner (validation.d/), bcvk gate
 ```
 
 ### 6.3 CLI
 
 ```
-nomira build    [recipe.yml]   # buildkitd sicherstellen → kompilieren →
-                               # solven (inkl. Konfliktprüfung) → oci-archive
-nomira validate [image]        # Gates: validation.d/-Hooks, bcvk test-basic
-nomira switch   [recipe.yml]   # build + validate + Import + bootc switch
-nomira graph    [recipe.yml]   # DAG als Baum/Mermaid (zeigt Parallelität)
+nomira build    [recipe.yml]   # ensure buildkitd → compile →
+                               # solve (incl. conflict check) → oci-archive
+nomira validate [image]        # gates: validation.d/ hooks, bcvk test-basic
+nomira switch   [recipe.yml]   # build + validate + import + bootc switch
+nomira graph    [recipe.yml]   # DAG as a tree/Mermaid (shows parallelism)
 ```
 
-Grundsätze: Fehlermeldungen ausschließlich in Recipe-Begriffen (Phase, Gruppe,
-Pfad – nie LLB-Vertex-IDs); Schema-Fehler vor dem ersten Build-Schritt;
-BuildKits Progress-UI wird durchgereicht, sodass parallele Gruppen als
-parallele Zeilen sichtbar sind. buildctl/skopeo/Daemon bleiben unsichtbar.
+Principles: error messages only in the terms of the recipe (phase, group,
+path, never LLB vertex IDs); schema errors before the first build step;
+BuildKit's progress UI is passed through, so parallel groups show up as
+parallel lines. buildctl, skopeo and the daemon stay invisible.
 
-## 7. Laufzeitumgebung und Lieferung
+## 7. Runtime environment and delivery
 
-- **Engine:** podman (einzige Laufzeit auf dem Host).
-- **Builder:** rootless `buildkitd`, betrieben als podman-Container oder
-  systemd-User-Service; `nomira build` startet/prüft ihn.
-- **Lieferkette:**
-  1. BuildKit-Export als `oci-archive`
+- **Engine:** podman (the only runtime on the host).
+- **Builder:** rootless `buildkitd`, run as a podman container or a systemd
+  user service; `nomira build` starts and checks it.
+- **Delivery chain:**
+  1. BuildKit export as `oci-archive`
   2. `skopeo copy oci-archive:… containers-storage:localhost/<name>`
   3. `bootc switch --transport containers-storage localhost/<name>`
-- **Pinning:** `settings.arch-snapshot` setzt die mirrorlist im Build auf
-  `archive.archlinux.org/repos/<datum>`. Das Datum ist die eine versionierte
-  Stelle, die den Paketstand determiniert („flake.lock für Arme"):
-  Update = Datum bumpen + rebuild, Rollback des Paketstands = Git-Revert.
-  `base-image` wird per Digest gepinnt.
-- **Generationen:** datierte oci-archives aufheben; optional lokale Registry
-  (z. B. zot) für Digest-Historie beliebiger Tiefe.
+- **Pinning:** `settings.arch-snapshot` points the mirrorlist in the build to
+  `archive.archlinux.org/repos/<date>`. The date is the one versioned place
+  that determines the package set (a poor man's `flake.lock`): update = bump
+  the date and rebuild, roll back the package set = git revert. `base-image`
+  is pinned by digest.
+- **Generations:** keep dated oci-archives; optionally a local registry (zot,
+  for instance) for a digest history of any depth.
 
-## 8. Post-Build-Gates (außerhalb des Images)
+## 8. Post-build gates (outside the image)
 
-Checks laufen gegen das fertige Image, nie als RUN-Layer:
+Checks run against the finished image, never as a RUN layer:
 
 ```
 validation.d/10-lint.sh      podman run --rm $IMG bootc container lint --fatal-warnings
 validation.d/20-units.sh     podman run --rm $IMG systemd-analyze verify …
 validation.d/30-apps.sh      podman run --rm $IMG sway --validate -c …
-(fest eingebaut)             bcvk ephemeral test-basic $IMG   # Boot-Smoke-Test
+(built in)                   bcvk ephemeral test-basic $IMG   # boot smoke test
 ```
 
-`nomira switch` führt Build → Gates → Import → bootc switch aus; ein
-fehlgeschlagenes Gate stoppt vor dem Import. Gates sind Shell-Hooks und damit
-einzeilig erweiterbar.
+`nomira switch` runs build → gates → import → bootc switch; a failed gate
+stops before the import. Gates are shell hooks and can be extended with a
+single line.
 
 ## 9. Roadmap
 
-- **v1 — CLI gegen buildkitd** (dieses Dokument): `client/llb` direkt, kein
-  Frontend-Image nötig, `# syntax=` nicht im Spiel.
-- **v2 — Gateway-Frontend:** dasselbe Go-Programm als Frontend-Image gebaut
-  und in eine beliebige erreichbare OCI-Registry gepusht (ghcr.io, Docker Hub,
-  localhost-Registry – es gibt keine privilegierte Liste und keinen
-  Freigabeprozess). Danach baut jedes Vanilla-buildx Recipes mit
-  `# syntax=ghcr.io/nomira-os/nomira:1-alpha`; testbar auch ohne Syntax-Zeile via
-  `buildctl build --frontend gateway.v0 --opt source=<image>`.
-- **Später/offen:** mehrstufige `allow`-Feinheiten (per-Pfad-Policy),
-  `env:`/`workdir:` pro Gruppe, Remote-Cache.
+- **v1: CLI against buildkitd** (this document): `client/llb` directly, no
+  frontend image needed, `# syntax=` not involved.
+- **v2: gateway frontend:** the same Go program built as a frontend image and
+  pushed to any reachable OCI registry (ghcr.io, Docker Hub, a localhost
+  registry; there is no privileged list and no approval process). After that
+  any vanilla buildx builds recipes with
+  `# syntax=ghcr.io/nomira-os/nomira:1-alpha`; testable without the syntax
+  line through `buildctl build --frontend gateway.v0 --opt source=<image>`.
+- **Later/open:** finer `allow` rules (per-path policy), `env:`/`workdir:` per
+  group, remote cache.
 
-## 10. Offene Punkte
+## 10. Open points
 
-- **buildkitd-Lifecycle:** autostart-Strategie (podman-Container vs.
-  systemd-User-Unit), Versionsanforderung (MergeOp/DiffOp ⇒ BuildKit ≥ 0.10,
-  real: aktuelle Version).
-- **Arch-bootc-Basis** bleibt experimentell (bootcrew/mono); das Projekt ist
-  davon unabhängig, erbt aber dessen Reifegrad für das Gesamtsystem.
-- **Hardlinks/Xattrs im Diff:** Erhebungsschritt muss SELinux-/Security-Xattrs
-  und Hardlink-Paare korrekt als Writes erfassen (Testfälle nötig).
-- **`allow-identical`-Hash-Definition:** Inhalt + Modus + Owner + Xattrs, oder
-  Inhalt allein? (Vorschlag: alles, strikt.)
+- **buildkitd lifecycle:** autostart strategy (podman container vs. systemd
+  user unit), version requirement (MergeOp/DiffOp ⇒ BuildKit ≥ 0.10, in
+  practice a current version).
+- **The Arch bootc base** remains experimental (bootcrew/mono); the project
+  does not depend on it, but the system as a whole inherits its maturity.
+- **Hard links and xattrs in the diff:** the collection step must record
+  SELinux/security xattrs and hard-link pairs correctly as writes (test cases
+  needed).
+- **Hash definition for `allow-identical`:** content + mode + owner + xattrs,
+  or content alone? (Proposal: everything, strict.)

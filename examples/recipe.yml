@@ -1,15 +1,15 @@
 # syntax=ghcr.io/nomira-os/nomira:1-alpha
 #
-# Beispiel: ein kleines System auf dem nomira-Basis-Image. Gruppen innerhalb
-# einer Phase sind deklariert unabhängig und werden im Build auf
-# Disjunktheit geprüft.
+# Example: a small system on the nomira base image. Groups within a phase
+# are declared independent, and the build verifies that their write sets
+# are disjoint.
 #
-# Der Paketstand kommt vom Basis-Image: Dessen mirrorlist zeigt auf den
-# Snapshot im Arch Linux Archive, der zum Tag gehört.
+# The package set comes from the base image: its mirrorlist points to the
+# Arch Linux Archive snapshot that belongs to the tag.
 
 settings:
-  name: meinsystem
-  description: Beispielsystem mit kmscon, NetworkManager und AppArmor
+  name: mysystem
+  description: Example system with kmscon, NetworkManager and AppArmor
   base: ghcr.io/nomira-os/nomira-image:2026.11.13
   validation: strict
   labels:

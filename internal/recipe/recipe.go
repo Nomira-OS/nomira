@@ -4,7 +4,7 @@
 //
 //	# syntax=ghcr.io/nomira-os/nomira:1-alpha
 //	settings:
-//	  name: meinsystem
+//	  name: mysystem
 //	  base: ghcr.io/…/arch-bootc@sha256:…
 //	  validation: strict            # file default: strict | allow-identical
 //	  toolbox: docker.io/library/busybox:1.36.1

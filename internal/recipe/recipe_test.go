@@ -7,7 +7,7 @@ import (
 
 const sample = `
 settings:
-  name: meinsystem
+  name: mysystem
   base: ghcr.io/example/arch-bootc:latest
   validation: strict
   args:

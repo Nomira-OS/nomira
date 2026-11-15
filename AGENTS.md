@@ -65,8 +65,8 @@ there, not here.
   yourself.
 - **Licence:** EUPL-1.2, declared through `REUSE.toml`; `reuse lint` must
   pass.
-- **Languages:** README and user-facing docs are German. Code, comments,
-  commit messages and this file are English.
+- **Language:** everything is English: README, docs, code, comments and
+  commit messages.
 - **Be explicit about what was not verified.** Unit tests do not start
   BuildKit. If a change affects a real build and you could not run one,
   say so in the commit or pull request.
