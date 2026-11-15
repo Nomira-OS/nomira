@@ -1,0 +1,20 @@
+# Builds the nomira gateway-frontend image.
+# Recipes select it via
+#   # syntax=ghcr.io/leaced/nomira:1
+#
+# Cross-compiles on the build platform (no QEMU needed for multi-arch).
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+ARG TARGETOS TARGETARCH
+WORKDIR /src
+COPY . .
+# `go mod tidy` resolves indirect requirements and go.sum when they are not
+# committed yet; once go.sum is in the repo it is a no-op.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go mod tidy && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags='-s -w' -o /nomira-frontend ./cmd/frontend
+
+FROM scratch
+COPY --from=build /nomira-frontend /usr/bin/nomira-frontend
+ENTRYPOINT ["/usr/bin/nomira-frontend"]

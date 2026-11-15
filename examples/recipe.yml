@@ -1,0 +1,51 @@
+# syntax=ghcr.io/leaced/nomira:1
+#
+# Beispiel: Arch-bootc-System mit kmscon, NetworkManager, AppArmor- und
+# xe-Kernelparametern. Gruppen innerhalb einer Phase sind deklariert
+# unabhängig und werden im Build auf Disjunktheit geprüft.
+
+settings:
+  name: meinsystem
+  base: ghcr.io/bootcrew/arch-bootc:latest   # TODO: per @sha256-Digest pinnen
+  validation: strict
+  args:
+    SNAPSHOT: "2026/11/10"                   # Arch Linux Archive; --build-arg SNAPSHOT=… überschreibt
+
+prepare:
+  aurbuild:
+    from: docker.io/library/archlinux:base-devel
+    commands:
+      - run --mount=type=cache,target=/var/cache/pacman/pkg pacman -Syu --noconfirm git sudo
+      - |
+        run useradd -m build && echo 'build ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/build && \
+            su build -c 'cd && git clone https://aur.archlinux.org/example-pkg.git && \
+            cd example-pkg && makepkg -s --noconfirm' && \
+            mkdir -p /out && cp /home/build/example-pkg/*.pkg.tar.zst /out/
+
+phases:
+  - name: base
+    groups:
+      system:
+        - |
+          run printf 'Server=https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' '${SNAPSHOT}' \
+              > /etc/pacman.d/mirrorlist
+        - run --mount=type=cache,target=/var/cache/pacman/pkg pacman -Syu --needed --noconfirm kmscon networkmanager apparmor python
+
+  - name: configs
+    shared:
+      - /usr/lib/tmpfiles.d/
+    groups:
+      kmscon:
+        - copy --chmod=0644 files/kmscon/ /etc/kmscon/
+      networkmanager:
+        - copy --chmod=0600 configs/nm/ /etc/NetworkManager/system-connections/
+      boot:
+        - run python3 /dev/null || true
+        - copy files/kargs/ /usr/lib/bootc/kargs.d/
+      aur:
+        - copy --from=aurbuild /out/ /var/tmp/aur/
+
+  - name: finish
+    groups:
+      enable:
+        - run systemctl enable kmscon NetworkManager apparmor && pacman -U --noconfirm /var/tmp/aur/*.pkg.tar.zst || true
