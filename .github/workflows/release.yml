@@ -24,6 +24,7 @@ jobs:
   go:
     uses: Nomira-OS/ci/.github/workflows/go.yml@main
     with:
+      trivy: true
       extra: |
         sh hack/test_lister.sh
         go run ./cmd/frontend lint examples/recipe.yml
@@ -55,6 +56,7 @@ jobs:
       image: ghcr.io/nomira-os/nomira
       file: Dockerfile.frontend
       platforms: linux/amd64,linux/arm64
+      fail-on-vulnerabilities: true
       tags: |
         ${{ needs.release.outputs.version }}
         1-alpha
