@@ -1,0 +1,60 @@
+# Started by hand from the Actions tab.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel
+        type: choice
+        options: [beta, final]
+        default: beta
+      dry-run:
+        description: Only show version and changelog
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: Nomira-OS/ci/.github/workflows/checks.yml@main
+
+  go:
+    uses: Nomira-OS/ci/.github/workflows/go.yml@main
+    with:
+      extra: |
+        sh hack/test_lister.sh
+        go run ./cmd/frontend lint examples/recipe.yml
+
+  release:
+    needs: [checks, go]
+    permissions:
+      contents: write
+    uses: Nomira-OS/ci/.github/workflows/release.yml@main
+    with:
+      channel: ${{ inputs.channel }}
+      dry-run: ${{ inputs.dry-run }}
+
+  # `1-alpha` is what recipes reference in `# syntax=` while schema 1 may
+  # still change; every release moves it. It becomes `1` once the schema is
+  # stable.
+  image:
+    needs: release
+    if: ${{ !inputs.dry-run }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      security-events: write
+      actions: read
+    uses: Nomira-OS/ci/.github/workflows/image.yml@main
+    with:
+      image: ghcr.io/nomira-os/nomira
+      file: Dockerfile.frontend
+      platforms: linux/amd64,linux/arm64
+      tags: |
+        ${{ needs.release.outputs.version }}
+        1-alpha

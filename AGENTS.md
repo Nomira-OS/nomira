@@ -41,7 +41,9 @@ sh hack/test_lister.sh                       # tests internal/compile/lister.sh
 go run ./cmd/frontend lint examples/recipe.yml
 ```
 
-CI runs exactly these, then builds and pushes the frontend image.
+CI runs exactly these through the shared workflows in `Nomira-OS/ci`,
+then publishes the frontend image as `sha-<commit>`. Change CI behaviour
+there, not here.
 
 ## Rules
 
@@ -55,8 +57,14 @@ CI runs exactly these, then builds and pushes the frontend image.
 - **Build-time environment** is passed per `run`, never stored in the LLB
   state, so it cannot leak into other groups or the image config.
 - **Versions are pinned.** Never use `latest` or another moving tag for
-  images, runners or actions. GitHub Actions are pinned to a commit SHA
-  with the version as a trailing comment. Renovate keeps pins current.
+  images, runners or actions. Renovate keeps pins current.
+- **Conventional Commits** for every commit (`feat:`, `fix:`, `docs:` …,
+  `!` for breaking changes, which includes any incompatible schema
+  change). Version and changelog are derived from them. Releases are cut
+  by hand with the `release` workflow (beta or final); never push a tag
+  yourself.
+- **Licence:** EUPL-1.2, declared through `REUSE.toml`; `reuse lint` must
+  pass.
 - **Languages:** README and user-facing docs are German. Code, comments,
   commit messages and this file are English.
 - **Be explicit about what was not verified.** Unit tests do not start

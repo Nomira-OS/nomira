@@ -3,7 +3,6 @@ name: ci
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 permissions:
@@ -13,63 +12,32 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  IMAGE: ghcr.io/nomira-os/nomira   # ghcr requires lowercase
-
 jobs:
-  test:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      # Resolves indirect requirements / go.sum while they are not committed.
-      - run: go mod tidy
-      - name: gofmt
-        run: test -z "$(gofmt -l .)"
-      - run: go vet ./...
-      - run: go test ./...
-      - run: sh hack/test_lister.sh
-      - name: Lint example recipe
-        run: go run ./cmd/frontend lint examples/recipe.yml
+  checks:
+    uses: Nomira-OS/ci/.github/workflows/checks.yml@main
 
+  go:
+    uses: Nomira-OS/ci/.github/workflows/go.yml@main
+    with:
+      extra: |
+        sh hack/test_lister.sh
+        go run ./cmd/frontend lint examples/recipe.yml
+
+  # Every commit on main is published as an immutable development build,
+  # sha-<commit>. Releases are cut by hand with the release workflow.
   image:
-    needs: test
-    runs-on: ubuntu-26.04
+    needs: go
     permissions:
       contents: read
       packages: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-        if: github.event_name != 'pull_request'
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.IMAGE }}
-          # `1-alpha` is what recipes reference in `# syntax=` while schema 1
-          # may still change; it becomes `1` once the schema is stable.
-          # There is deliberately no `latest`.
-          flavor: latest=false
-          tags: |
-            type=raw,value=1-alpha,enable={{is_default_branch}}
-            type=sha,format=short
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=ref,event=pr
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          file: Dockerfile.frontend
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      id-token: write
+      attestations: write
+      security-events: write
+      actions: read
+    uses: Nomira-OS/ci/.github/workflows/image.yml@main
+    with:
+      image: ghcr.io/nomira-os/nomira
+      file: Dockerfile.frontend
+      platforms: linux/amd64,linux/arm64
+      tags: sha-${{ github.sha }}
+      push: ${{ github.event_name != 'pull_request' }}

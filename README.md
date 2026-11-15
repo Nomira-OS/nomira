@@ -120,10 +120,18 @@ weiterhin auf den Build-Kontext, nicht auf die eingebundene Datei.
 
 ## Bauen eines Recipes
 
-Das Frontend-Image wird von der CI (`.github/workflows/ci.yml`) bei jedem
-Push auf `main` nach `ghcr.io/nomira-os/nomira` veröffentlicht (Tags `1-alpha`
-und `sha-…`; bei `v*`-Tags zusätzlich die Versionsnummer), für
-`linux/amd64` und `linux/arm64`. Lokal bauen geht weiterhin:
+Das Frontend-Image liegt unter `ghcr.io/nomira-os/nomira`, für
+`linux/amd64` und `linux/arm64`, signiert mit cosign:
+
+- **Releases** entstehen von Hand über den Workflow „release“ (`beta`
+  oder `final`) und tragen die Versionsnummer als Tag. Jedes Release
+  bewegt außerdem `1-alpha`, auf das Recipes verweisen.
+- **Jeder Commit auf `main`** wird als unveränderlicher Entwicklungsstand
+  `sha-<commit>` veröffentlicht.
+
+Version und Changelog ergeben sich aus den Conventional Commits, siehe
+[Nomira-OS/ci](https://github.com/Nomira-OS/ci). Lokal bauen geht
+weiterhin:
 
 ```sh
 podman build -f Dockerfile.frontend -t ghcr.io/nomira-os/nomira:1-alpha .
@@ -203,3 +211,7 @@ Leerzeichen-Pfade).
   (`settings.toolbox`, Default `docker.io/library/busybox:1.36.1`).
 - Plattform folgt dem Build-Host; Multi-Arch ist offen.
 - Gegen BuildKit v0.35.0 gebaut; MergeOp/DiffOp brauchen ≥ 0.10.
+
+## Lizenz
+
+EUPL-1.2, siehe `LICENSES/`. Die Angaben je Datei stehen in `REUSE.toml`.
