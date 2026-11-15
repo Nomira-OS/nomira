@@ -62,6 +62,33 @@ Befehle sind Strings mit Verb am Anfang (Mehrzeiler als YAML-Blockskalar):
 u. ä. bleiben unangetastet. Ein geänderter Arg invalidiert genau die
 Befehle, die ihn verwenden (korrekte Cache-Semantik).
 
+## Aufteilen auf mehrere Dateien
+
+Ein Recipe hat eine Einstiegsdatei; alles Weitere lässt sich mit `include`
+auslagern. Pfade gelten relativ zur einbindenden Datei und müssen im
+Recipe-Verzeichnis bleiben. Eingebundene Dateien dürfen selbst wieder
+einbinden; Zyklen sind ein Fehler.
+
+```yaml
+prepare:
+  aurbuild:
+    from: docker.io/library/archlinux:base-devel
+    commands: {include: stages/aur.yml}     # Datei mit einer Befehlsliste
+
+phases:
+  - include: phases/base.yml                # Datei mit einer Phase oder einer Liste von Phasen
+  - name: configs
+    groups:
+      kmscon: {include: groups/kmscon.yml}  # Datei mit einer Befehlsliste
+      networkmanager:
+        - copy configs/nm/ /etc/NetworkManager/
+```
+
+Überall, wo eine Befehlsliste steht, geht stattdessen `include: <datei>`;
+in der Phasenliste bindet `- include: <datei>` ganze Phasen ein. `settings`
+steht nur in der Einstiegsdatei. Quellpfade von `copy` beziehen sich
+weiterhin auf den Build-Kontext, nicht auf die eingebundene Datei.
+
 ## Bauen eines Recipes
 
 Das Frontend-Image wird von der CI (`.github/workflows/ci.yml`) bei jedem
@@ -111,6 +138,7 @@ Sprache (z. B. Rust) Schema-Validierung und Graph nicht nachbauen muss:
 ```sh
 nomira-frontend lint  recipe.yml     # Parse + Schema; Exit 1 mit Fehlern
 nomira-frontend graph recipe.yml     # Pipeline als Mermaid-Flowchart
+nomira-frontend inspect recipe.yml   # Name, Basis, Phasen und Gruppen als JSON
 podman run --rm -i ghcr.io/nomira-os/nomira:1 lint - < recipe.yml
 ```
 

@@ -6,15 +6,18 @@
 //	                 `--frontend gateway.v0 --opt source=<image>`
 //	lint  [file|-]   parse + schema-validate a recipe; exit 1 with errors
 //	graph [file|-]   print the pipeline as a Mermaid flowchart
+//	inspect [file|-] print name, base and phase/group names as JSON
 //
 // lint/graph exist so a thin CLI (in any language) can reuse the Go parser
 // by running this image via podman instead of reimplementing the schema.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/moby/buildkit/frontend/gateway/grpcclient"
 	"github.com/moby/buildkit/util/appcontext"
@@ -27,9 +30,11 @@ func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "lint":
-			os.Exit(lint(fileArg()))
+			os.Exit(lint())
+		case "inspect":
+			os.Exit(inspect())
 		case "graph":
-			os.Exit(graph(fileArg()))
+			os.Exit(graph())
 		case "--help", "-h", "help":
 			usage(os.Stdout)
 			return
@@ -52,31 +57,33 @@ usage:
   nomira-frontend              run as gateway frontend (BuildKit invokes this)
   nomira-frontend lint  [f|-]  parse + validate a recipe (default: stdin)
   nomira-frontend graph [f|-]  print pipeline as Mermaid (default: stdin)
+  nomira-frontend inspect [f|-] print name, base, phases and groups as JSON
+
+Recipes that use "include" must be given as a file path.
 `)
 }
 
-func fileArg() io.Reader {
+// load parses the recipe named on the command line, or stdin for "-" or no
+// argument. Includes need a file path: they resolve relative to it.
+func load() (*recipe.Recipe, error) {
 	if len(os.Args) > 2 && os.Args[2] != "-" {
-		f, err := os.Open(os.Args[2])
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
+		dir, entry := filepath.Split(os.Args[2])
+		if dir == "" {
+			dir = "."
 		}
-		return f
+		return recipe.ParseFile(entry, func(name string) ([]byte, error) {
+			return os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
+		}, nil)
 	}
-	return os.Stdin
-}
-
-func parseFrom(in io.Reader) (*recipe.Recipe, error) {
-	data, err := io.ReadAll(in)
+	data, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		return nil, err
 	}
 	return recipe.Parse(data, nil)
 }
 
-func lint(in io.Reader) int {
-	if _, err := parseFrom(in); err != nil {
+func lint() int {
+	if _, err := load(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
@@ -84,12 +91,39 @@ func lint(in io.Reader) int {
 	return 0
 }
 
-func graph(in io.Reader) int {
-	r, err := parseFrom(in)
+func graph() int {
+	r, err := load()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
 	fmt.Print(r.Graph())
+	return 0
+}
+
+func inspect() int {
+	r, err := load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	type phase struct {
+		Name   string   `json:"name"`
+		Groups []string `json:"groups"`
+	}
+	out := struct {
+		Name   string  `json:"name"`
+		Base   string  `json:"base"`
+		Phases []phase `json:"phases"`
+	}{Name: r.Settings.Name, Base: r.Settings.Base}
+	for _, p := range r.Phases {
+		out.Phases = append(out.Phases, phase{Name: p.Name, Groups: p.GroupNames()})
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	return 0
 }

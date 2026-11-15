@@ -30,7 +30,11 @@ const (
 func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	opts := c.BuildOpts().Opts
 
-	data, filename, err := readRecipeFile(ctx, c, opts)
+	filename := opts[keyFilename]
+	if filename == "" {
+		filename = defaultFilename
+	}
+	read, err := recipeReader(ctx, c, filename)
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +46,7 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		}
 	}
 
-	r, err := recipe.Parse(data, buildArgs)
+	r, err := recipe.ParseFile(filename, read, buildArgs)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
@@ -87,33 +91,29 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	return out, nil
 }
 
-// readRecipeFile loads the recipe from the "dockerfile" local source.
-func readRecipeFile(ctx context.Context, c client.Client, opts map[string]string) ([]byte, string, error) {
-	filename := opts[keyFilename]
-	if filename == "" {
-		filename = defaultFilename
-	}
+// recipeReader loads the recipe directory (entry file plus all YAML files,
+// so includes resolve) from the "dockerfile" local source and returns a
+// reader over it.
+func recipeReader(ctx context.Context, c client.Client, filename string) (recipe.ReadFunc, error) {
 	src := llb.Local(localDockerfile,
-		llb.FollowPaths([]string{filename}),
+		llb.IncludePatterns([]string{filename, "*.yml", "*.yaml", "**/*.yml", "**/*.yaml"}),
 		llb.WithCustomName("[recipe] load "+filename),
 	)
 	def, err := src.Marshal(ctx)
 	if err != nil {
-		return nil, filename, err
+		return nil, err
 	}
 	res, err := c.Solve(ctx, client.SolveRequest{Definition: def.ToPB()})
 	if err != nil {
-		return nil, filename, err
+		return nil, err
 	}
 	ref, err := res.SingleRef()
 	if err != nil {
-		return nil, filename, err
+		return nil, err
 	}
-	data, err := ref.ReadFile(ctx, client.ReadRequest{Filename: filename})
-	if err != nil {
-		return nil, filename, fmt.Errorf("read %s: %w", filename, err)
-	}
-	return data, filename, nil
+	return func(name string) ([]byte, error) {
+		return ref.ReadFile(ctx, client.ReadRequest{Filename: name})
+	}, nil
 }
 
 // validatePhase collects each group's write set (in parallel) and checks

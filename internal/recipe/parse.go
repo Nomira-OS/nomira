@@ -3,6 +3,7 @@ package recipe
 import (
 	"bytes"
 	"fmt"
+	"path"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -25,27 +26,49 @@ type rawSettings struct {
 }
 
 type rawStage struct {
-	From     string   `yaml:"from"`
-	Commands []string `yaml:"commands"`
+	From     string  `yaml:"from"`
+	Commands cmdList `yaml:"commands"`
 }
 
 type rawPhase struct {
-	Name       string              `yaml:"name"`
-	Validation string              `yaml:"validation"`
-	Shared     []string            `yaml:"shared"`
-	Groups     map[string][]string `yaml:"groups"`
+	Name       string             `yaml:"name"`
+	Validation string             `yaml:"validation"`
+	Shared     []string           `yaml:"shared"`
+	Include    string             `yaml:"include"`
+	Groups     map[string]cmdList `yaml:"groups"`
 }
 
 // Parse decodes, schema-validates and arg-expands a recipe. buildArgs are the
 // caller-supplied overrides (from `--opt build-arg:NAME=...`); only args
 // declared in settings.args may be overridden.
+//
+// Parse handles a single self-contained file; use ParseFile for recipes
+// that use `include`.
 func Parse(data []byte, buildArgs map[string]string) (*Recipe, error) {
+	const entry = "recipe.yml"
+	return ParseFile(entry, func(name string) ([]byte, error) {
+		if name == entry {
+			return data, nil
+		}
+		return nil, errf("includes are not available when the recipe is read from a single stream")
+	}, buildArgs)
+}
+
+// ParseFile parses the recipe at entry, resolving `include` through read.
+// Include paths are relative to the including file.
+func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recipe, error) {
+	entry = path.Clean(entry)
+	data, err := read(entry)
+	if err != nil {
+		return nil, errf("recipe: %w", err)
+	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var raw rawRecipe
 	if err := dec.Decode(&raw); err != nil {
 		return nil, errf("recipe: %w", err)
 	}
+	ld := &loader{read: read, stack: []string{entry}}
 
 	// Effective args: declared defaults, overridden by build args.
 	args := map[string]string{}
@@ -87,11 +110,15 @@ func Parse(data []byte, buildArgs map[string]string) (*Recipe, error) {
 		if rs.From == "" {
 			return nil, errf("recipe: prepare.%s: from is required", name)
 		}
-		if len(rs.Commands) == 0 {
+		lines, err := ld.commands(entry, rs.Commands)
+		if err != nil {
+			return nil, errf("recipe: prepare.%s: %w", name, err)
+		}
+		if len(lines) == 0 {
 			return nil, errf("recipe: prepare.%s: commands must not be empty", name)
 		}
 		st := Stage{From: ExpandArgs(rs.From, args)}
-		for i, line := range rs.Commands {
+		for i, line := range lines {
 			cmd, err := ParseCommand(ExpandArgs(line, args))
 			if err != nil {
 				return nil, errf("recipe: prepare.%s: command %d: %w", name, i+1, err)
@@ -105,11 +132,15 @@ func Parse(data []byte, buildArgs map[string]string) (*Recipe, error) {
 	}
 
 	// Phases.
-	if len(raw.Phases) == 0 {
+	phases, err := ld.phases(entry, raw.Phases)
+	if err != nil {
+		return nil, errf("recipe: %w", err)
+	}
+	if len(phases) == 0 {
 		return nil, errf("recipe: phases must not be empty")
 	}
 	seenPhase := map[string]bool{}
-	for pi, rp := range raw.Phases {
+	for pi, rp := range phases {
 		if rp.Name == "" {
 			return nil, errf("recipe: phases[%d]: name is required", pi)
 		}
