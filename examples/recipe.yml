@@ -1,4 +1,4 @@
-# syntax=ghcr.io/nomira-os/nomira:1
+# syntax=ghcr.io/nomira-os/nomira:1-alpha
 #
 # Beispiel: ein kleines System auf dem nomira-Basis-Image. Gruppen innerhalb
 # einer Phase sind deklariert unabhängig und werden im Build auf

@@ -7,7 +7,11 @@ Guidance for coding agents (and humans) working in this repository.
 `nomira` is a BuildKit gateway frontend. It compiles a YAML recipe into an
 LLB graph: phases run serially, the groups of a phase fan out on the same
 base state, are diffed, checked for write-set disjointness, and merged.
-Recipes select it with `# syntax=ghcr.io/nomira-os/nomira:1`.
+Recipes select it with `# syntax=ghcr.io/nomira-os/nomira:1-alpha`.
+
+The project is in alpha: the schema may still change, but every change
+must keep README, example and tests in step. The image tag stays
+`1-alpha` until the schema is declared stable.
 
 Sibling repositories in the Nomira-OS organization:
 

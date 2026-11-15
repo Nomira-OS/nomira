@@ -1,5 +1,5 @@
 BIN      ?= bin/nomira-frontend
-IMAGE    ?= ghcr.io/nomira-os/nomira:1
+IMAGE    ?= ghcr.io/nomira-os/nomira:1-alpha
 GOFLAGS  ?=
 
 .PHONY: build test lister-test lint-example graph-example image clean

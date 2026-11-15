@@ -269,7 +269,7 @@ einzeilig erweiterbar.
   und in eine beliebige erreichbare OCI-Registry gepusht (ghcr.io, Docker Hub,
   localhost-Registry – es gibt keine privilegierte Liste und keinen
   Freigabeprozess). Danach baut jedes Vanilla-buildx Recipes mit
-  `# syntax=ghcr.io/nomira-os/nomira:1`; testbar auch ohne Syntax-Zeile via
+  `# syntax=ghcr.io/nomira-os/nomira:1-alpha`; testbar auch ohne Syntax-Zeile via
   `buildctl build --frontend gateway.v0 --opt source=<image>`.
 - **Später/offen:** mehrstufige `allow`-Feinheiten (per-Pfad-Policy),
   `env:`/`workdir:` pro Gruppe, Remote-Cache.

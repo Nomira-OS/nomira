@@ -1,5 +1,9 @@
 # nomira
 
+> **Alpha.** Das Recipe-Schema kann sich noch ohne Ankündigung ändern.
+> Recipes verweisen deshalb auf `ghcr.io/nomira-os/nomira:1-alpha`; mit
+> dem stabilen Schema wird daraus `:1`.
+
 Ein BuildKit-Gateway-Frontend für phasen-basierte, **verifiziert-parallele**
 OCI-Builds von bootc-Systemimages (primär Arch Linux). Siehe `docs/concept.md`
 (Konzept v1; beim Recipe-Schema gilt dieses README) für Motivation und Modell.
@@ -22,7 +26,7 @@ S' = Merge(S, Δ₁ … Δₙ)
 ## Recipe
 
 ```yaml
-# syntax=ghcr.io/nomira-os/nomira:1
+# syntax=ghcr.io/nomira-os/nomira:1-alpha
 settings:
   name: meinsystem
   description: Mein System                  # wird zum Label org.opencontainers.image.description
@@ -117,12 +121,12 @@ weiterhin auf den Build-Kontext, nicht auf die eingebundene Datei.
 ## Bauen eines Recipes
 
 Das Frontend-Image wird von der CI (`.github/workflows/ci.yml`) bei jedem
-Push auf `main` nach `ghcr.io/nomira-os/nomira` veröffentlicht (Tags `1`
+Push auf `main` nach `ghcr.io/nomira-os/nomira` veröffentlicht (Tags `1-alpha`
 und `sha-…`; bei `v*`-Tags zusätzlich die Versionsnummer), für
 `linux/amd64` und `linux/arm64`. Lokal bauen geht weiterhin:
 
 ```sh
-podman build -f Dockerfile.frontend -t ghcr.io/nomira-os/nomira:1 .
+podman build -f Dockerfile.frontend -t ghcr.io/nomira-os/nomira:1-alpha .
 ```
 
 Dann baut jedes Vanilla-BuildKit das Recipe — die `# syntax=`-Zeile wählt
@@ -142,7 +146,7 @@ Frontend-Builds):
 
 ```sh
 buildctl build \
-  --frontend gateway.v0 --opt source=ghcr.io/nomira-os/nomira:1 \
+  --frontend gateway.v0 --opt source=ghcr.io/nomira-os/nomira:1-alpha \
   --local context=. --local dockerfile=. \
   --opt filename=recipe.yml \
   --output type=oci,dest=img.tar
@@ -164,7 +168,7 @@ Sprache (z. B. Rust) Schema-Validierung und Graph nicht nachbauen muss:
 nomira-frontend lint  recipe.yml     # Parse + Schema; Exit 1 mit Fehlern
 nomira-frontend graph recipe.yml     # Pipeline als Mermaid-Flowchart
 nomira-frontend inspect recipe.yml   # Name, Basis, Phasen und Gruppen als JSON
-podman run --rm -i ghcr.io/nomira-os/nomira:1 lint - < recipe.yml
+podman run --rm -i ghcr.io/nomira-os/nomira:1-alpha lint - < recipe.yml
 ```
 
 ## Entwicklung

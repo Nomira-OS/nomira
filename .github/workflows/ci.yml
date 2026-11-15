@@ -53,11 +53,12 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE }}
-          # `1` is the schema major that recipes reference in `# syntax=`.
+          # `1-alpha` is what recipes reference in `# syntax=` while schema 1
+          # may still change; it becomes `1` once the schema is stable.
           # There is deliberately no `latest`.
           flavor: latest=false
           tags: |
-            type=raw,value=1,enable={{is_default_branch}}
+            type=raw,value=1-alpha,enable={{is_default_branch}}
             type=sha,format=short
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}

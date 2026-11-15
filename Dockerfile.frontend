@@ -1,6 +1,6 @@
 # Builds the nomira gateway-frontend image.
 # Recipes select it via
-#   # syntax=ghcr.io/nomira-os/nomira:1
+#   # syntax=ghcr.io/nomira-os/nomira:1-alpha
 #
 # Cross-compiles on the build platform (no QEMU needed for multi-arch).
 FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS build
