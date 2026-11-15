@@ -19,8 +19,8 @@ import (
 	"github.com/moby/buildkit/frontend/gateway/grpcclient"
 	"github.com/moby/buildkit/util/appcontext"
 
-	"github.com/Leaced/nomira/internal/frontend"
-	"github.com/Leaced/nomira/internal/recipe"
+	"github.com/Nomira-OS/nomira/internal/frontend"
+	"github.com/Nomira-OS/nomira/internal/recipe"
 )
 
 func main() {

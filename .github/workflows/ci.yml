@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE: ghcr.io/leaced/nomira   # ghcr requires lowercase
+  IMAGE: ghcr.io/nomira-os/nomira   # ghcr requires lowercase
 
 jobs:
   test:

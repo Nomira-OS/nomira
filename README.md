@@ -22,7 +22,7 @@ S' = Merge(S, Δ₁ … Δₙ)
 ## Recipe
 
 ```yaml
-# syntax=ghcr.io/leaced/nomira:1
+# syntax=ghcr.io/nomira-os/nomira:1
 settings:
   name: meinsystem
   base: ghcr.io/…/arch-bootc@sha256:…
@@ -65,12 +65,12 @@ Befehle, die ihn verwenden (korrekte Cache-Semantik).
 ## Bauen eines Recipes
 
 Das Frontend-Image wird von der CI (`.github/workflows/ci.yml`) bei jedem
-Push auf `main` nach `ghcr.io/leaced/nomira` veröffentlicht (Tags `1`,
+Push auf `main` nach `ghcr.io/nomira-os/nomira` veröffentlicht (Tags `1`,
 `latest`, `sha-…`; bei `v*`-Tags zusätzlich die Versionsnummer), für
 `linux/amd64` und `linux/arm64`. Lokal bauen geht weiterhin:
 
 ```sh
-podman build -f Dockerfile.frontend -t ghcr.io/leaced/nomira:1 .
+podman build -f Dockerfile.frontend -t ghcr.io/nomira-os/nomira:1 .
 ```
 
 Dann baut jedes Vanilla-BuildKit das Recipe — die `# syntax=`-Zeile wählt
@@ -90,7 +90,7 @@ Frontend-Builds):
 
 ```sh
 buildctl build \
-  --frontend gateway.v0 --opt source=ghcr.io/leaced/nomira:1 \
+  --frontend gateway.v0 --opt source=ghcr.io/nomira-os/nomira:1 \
   --local context=. --local dockerfile=. \
   --opt filename=recipe.yml \
   --output type=oci,dest=img.tar
@@ -111,7 +111,7 @@ Sprache (z. B. Rust) Schema-Validierung und Graph nicht nachbauen muss:
 ```sh
 nomira-frontend lint  recipe.yml     # Parse + Schema; Exit 1 mit Fehlern
 nomira-frontend graph recipe.yml     # Pipeline als Mermaid-Flowchart
-podman run --rm -i ghcr.io/leaced/nomira:1 lint - < recipe.yml
+podman run --rm -i ghcr.io/nomira-os/nomira:1 lint - < recipe.yml
 ```
 
 ## Entwicklung

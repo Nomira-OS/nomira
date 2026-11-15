@@ -2,7 +2,7 @@
 //
 // Shape (v2, "# syntax" era):
 //
-//	# syntax=ghcr.io/leaced/nomira:1
+//	# syntax=ghcr.io/nomira-os/nomira:1
 //	settings:
 //	  name: meinsystem
 //	  base: ghcr.io/…/arch-bootc@sha256:…

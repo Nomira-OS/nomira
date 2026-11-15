@@ -1,4 +1,4 @@
-# syntax=ghcr.io/leaced/nomira:1
+# syntax=ghcr.io/nomira-os/nomira:1
 #
 # Beispiel: Arch-bootc-System mit kmscon, NetworkManager, AppArmor- und
 # xe-Kernelparametern. Gruppen innerhalb einer Phase sind deklariert

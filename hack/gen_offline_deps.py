@@ -85,7 +85,7 @@ def main() -> int:
         replaces.append(f"\t{mod} => {d}\n")
 
     with open(out, "w") as f:
-        f.write("module github.com/Leaced/nomira\n\n")
+        f.write("module github.com/Nomira-OS/nomira\n\n")
         f.write(GO_DIRECTIVE + "\n")
         f.write("require (\n" + "".join(sorted(set(requires))) + ")\n\n")
         f.write("replace (\n" + "".join(sorted(set(replaces))) + ")\n")

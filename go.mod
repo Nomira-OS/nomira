@@ -1,4 +1,4 @@
-module github.com/Leaced/nomira
+module github.com/Nomira-OS/nomira
 
 go 1.26.8
 

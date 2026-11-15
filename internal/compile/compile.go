@@ -12,7 +12,7 @@ import (
 
 	"github.com/moby/buildkit/client/llb"
 
-	"github.com/Leaced/nomira/internal/recipe"
+	"github.com/Nomira-OS/nomira/internal/recipe"
 )
 
 const (

@@ -14,9 +14,9 @@ import (
 	"github.com/moby/buildkit/frontend/gateway/client"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/Leaced/nomira/internal/compile"
-	"github.com/Leaced/nomira/internal/conflict"
-	"github.com/Leaced/nomira/internal/recipe"
+	"github.com/Nomira-OS/nomira/internal/compile"
+	"github.com/Nomira-OS/nomira/internal/conflict"
+	"github.com/Nomira-OS/nomira/internal/recipe"
 )
 
 const (
