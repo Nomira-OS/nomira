@@ -4,9 +4,22 @@
 > Recipes verweisen deshalb auf `ghcr.io/nomira-os/nomira:1-alpha`; mit
 > dem stabilen Schema wird daraus `:1`.
 
-Ein BuildKit-Gateway-Frontend für phasen-basierte, **verifiziert-parallele**
-OCI-Builds von bootc-Systemimages (primär Arch Linux). Siehe `docs/concept.md`
-(Konzept v1; beim Recipe-Schema gilt dieses README) für Motivation und Modell.
+Ein BuildKit-Frontend, das Container-Images aus einem YAML-Recipe baut:
+in Phasen, deren Gruppen **nachweislich unabhängig** und deshalb parallel
+und einzeln gecacht gebaut werden.
+
+Das Frontend steht für sich. Es baut jedes OCI-Image, mit jedem
+Basis-Image und jedem BuildKit ab v0.10, also auch über `docker buildx`.
+Entstanden ist es für Betriebssystem-Images mit bootc (siehe
+[Wofür es entstanden ist](#wofür-es-entstanden-ist)), setzt davon aber
+nichts voraus.
+
+## Die Idee
+
+In einem Dockerfile hängt jeder Schritt am vorherigen: Ändert sich einer,
+laufen alle folgenden neu. Unabhängige Schritte lassen sich nur über
+Multistage-Umwege parallel bauen, und niemand prüft, ob sie wirklich
+unabhängig sind.
 
 - **Phasen** laufen seriell in deklarierter Reihenfolge.
 - **Gruppen** innerhalb einer Phase sind deklariert unabhängig: Fan-out auf
@@ -23,14 +36,42 @@ S ──Exec(gₙ)──→ Rₙ ──Diff──→ Δₙ  ┘
 S' = Merge(S, Δ₁ … Δₙ)
 ```
 
+Ändert sich eine Gruppe, baut nur sie neu; ihre Nachbarn kommen aus dem
+Cache. Motivation und Modell im Einzelnen: `docs/concept.md` (Konzept v1;
+beim Recipe-Schema gilt dieses README).
+
+## Kurzes Beispiel
+
+```yaml
+# syntax=ghcr.io/nomira-os/nomira:1-alpha
+settings:
+  name: test
+  base: docker.io/library/alpine:3.22
+phases:
+  - name: inhalt
+    groups:
+      a: ["run echo a > /etc/a"]
+      b: ["run echo b > /etc/b"]
+```
+
+Schreiben `a` und `b` dieselbe Datei, bricht der Build ab:
+
+```text
+phase "inhalt": declared-independent groups are not disjoint (policy: strict):
+  groups "a" and "b": /etc/a (both write)
+```
+
 ## Recipe
+
+Das vollständige Schema an einem Beispiel, hier mit einem Arch-Image als
+Basis:
 
 ```yaml
 # syntax=ghcr.io/nomira-os/nomira:1-alpha
 settings:
   name: meinsystem
   description: Mein System                  # wird zum Label org.opencontainers.image.description
-  base: ghcr.io/nomira-os/nomira-image:2026.11.13
+  base: docker.io/library/archlinux:base     # beliebiges Image; in echten Recipes per Digest festlegen
   validation: strict                        # Datei-Default: strict | allow-identical
   labels:                                   # Labels am fertigen Image
     org.example.owner: ich
@@ -160,12 +201,24 @@ buildctl build \
   --output type=oci,dest=img.tar
 ```
 
-Lieferung an podman/bootc:
+Das Ergebnis ist ein gewöhnliches OCI-Image, etwa für podman:
 
 ```sh
 skopeo copy oci-archive:img.tar containers-storage:localhost/meinsystem
-bootc switch --transport containers-storage localhost/meinsystem
 ```
+
+## Wofür es entstanden ist
+
+Das Frontend ist ein Baustein von [nomira](https://github.com/Nomira-OS):
+Dort beschreibt ein Recipe ein ganzes Betriebssystem, das als
+bootc-Image gebaut und atomar eingespielt wird. Dazu gehören die
+[CLI](https://github.com/Nomira-OS/nomira-cli) und ein minimales
+[Arch-Basis-Image](https://github.com/Nomira-OS/nomira-image). Gerade
+dort lohnt sich das Modell: Ein System besteht aus vielen Teilen, die
+nichts miteinander zu tun haben (Terminal, Netzwerk, Bootloader), und
+eine Änderung an einem soll nicht alle anderen neu bauen.
+
+Erprobt ist das Frontend bisher mit Alpine- und Arch-Images.
 
 ## Zusatzmodi (für dünne CLIs)
 
