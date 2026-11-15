@@ -9,7 +9,8 @@ in Phasen, deren Gruppen **nachweislich unabhängig** und deshalb parallel
 und einzeln gecacht gebaut werden.
 
 Das Frontend steht für sich. Es baut jedes OCI-Image, mit jedem
-Basis-Image und jedem BuildKit ab v0.10, also auch über `docker buildx`.
+Basis-Image und jedem BuildKit ab v0.10. Über `docker buildx` sollte es
+damit ebenfalls laufen; erprobt ist bisher nur `buildctl`.
 Entstanden ist es für Betriebssystem-Images mit bootc (siehe
 [Wofür es entstanden ist](#wofür-es-entstanden-ist)), setzt davon aber
 nichts voraus.
