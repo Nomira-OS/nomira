@@ -8,6 +8,7 @@ package compile
 import (
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/moby/buildkit/client/llb"
@@ -62,7 +63,7 @@ func Compile(r *recipe.Recipe) (*Build, error) {
 	for name, st := range r.Prepare {
 		state := baseState(st.From, fmt.Sprintf("prepare %s", name))
 		var err error
-		state, err = applyCommands(state, st.Commands, ctxSrc, b.Stages, fmt.Sprintf("prepare %s", name))
+		state, err = applyCommands(state, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, fmt.Sprintf("prepare %s", name))
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +81,7 @@ func Compile(r *recipe.Recipe) (*Build, error) {
 		}
 		names := ph.GroupNames()
 		for _, g := range names {
-			upper, err := applyCommands(cur, ph.Groups[g], ctxSrc, b.Stages, fmt.Sprintf("%s/%s", ph.Name, g))
+			upper, err := applyCommands(cur, ph.Groups[g], mergeEnv(r.Settings.Env, ph.Env), ctxSrc, b.Stages, fmt.Sprintf("%s/%s", ph.Name, g))
 			if err != nil {
 				return nil, err
 			}
@@ -113,10 +114,28 @@ func baseState(ref, name string) llb.State {
 		AddEnv("PATH", defaultPath)
 }
 
-// applyCommands folds a group's commands over a state.
-func applyCommands(st llb.State, cmds []recipe.Command, ctxSrc llb.State, stages map[string]llb.State, scope string) (llb.State, error) {
+// mergeEnv returns a fresh map; later maps win.
+func mergeEnv(maps ...map[string]string) map[string]string {
+	out := map[string]string{}
+	for _, m := range maps {
+		for k, v := range m {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// applyCommands folds a group's commands over a state. env is the group's
+// build-time environment (settings, then phase); `env` commands extend it
+// for the commands that follow. It is passed to each run rather than stored
+// in the state, so it never leaks into other groups, later phases or the
+// image configuration.
+func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, ctxSrc llb.State, stages map[string]llb.State, scope string) (llb.State, error) {
 	for _, c := range cmds {
 		switch cmd := c.(type) {
+		case recipe.EnvCmd:
+			env[cmd.Name] = cmd.Value
+
 		case recipe.RunCmd:
 			opts := []llb.RunOption{
 				llb.Args([]string{"/bin/sh", "-c", cmd.Script}),
@@ -133,6 +152,17 @@ func applyCommands(st llb.State, cmds []recipe.Command, ctxSrc llb.State, stages
 				}
 				opts = append(opts, llb.AddMount(m.Target, llb.Scratch(),
 					llb.AsPersistentCacheDir(m.ID, sharing)))
+			}
+			names := make([]string, 0, len(env))
+			for k := range env {
+				names = append(names, k)
+			}
+			sort.Strings(names)
+			for _, k := range names {
+				opts = append(opts, llb.AddEnv(k, env[k]))
+			}
+			if cmd.NoCache {
+				opts = append(opts, llb.IgnoreCache)
 			}
 			st = st.Run(opts...).Root()
 

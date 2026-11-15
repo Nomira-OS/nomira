@@ -175,3 +175,57 @@ func TestIncludeErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestEnvNoCacheAndMetadata(t *testing.T) {
+	src := `
+settings:
+  base: x
+  description: demo ${V}
+  labels: {org.example.version: "${V}"}
+  env: {LANG: C.UTF-8}
+  platforms: [linux/amd64, linux/arm64]
+  tags: ["${V}", stable]
+  args: {V: "1.2"}
+phases:
+  - name: a
+    env: {MAKEFLAGS: -j4}
+    groups:
+      g:
+        - env GREETING=hello world
+        - run --no-cache --mount=type=cache,target=/c make
+`
+	r, err := Parse([]byte(src), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := r.Settings
+	if s.Description != "demo 1.2" || s.Labels["org.example.version"] != "1.2" || s.Env["LANG"] != "C.UTF-8" {
+		t.Errorf("settings: %+v", s)
+	}
+	if strings.Join(s.Tags, ",") != "1.2,stable" || len(s.Platforms) != 2 {
+		t.Errorf("tags/platforms: %v %v", s.Tags, s.Platforms)
+	}
+	if r.Phases[0].Env["MAKEFLAGS"] != "-j4" {
+		t.Errorf("phase env: %v", r.Phases[0].Env)
+	}
+	cmds := r.Phases[0].Groups["g"]
+	if e := cmds[0].(EnvCmd); e.Name != "GREETING" || e.Value != "hello world" {
+		t.Errorf("env cmd: %+v", e)
+	}
+	if run := cmds[1].(RunCmd); !run.NoCache || len(run.Mounts) != 1 || run.Script != "make" {
+		t.Errorf("run cmd: %+v", run)
+	}
+
+	bad := map[string]string{
+		"env name":  "settings: {base: x, env: {'1A': b}}\nphases: [{name: a, groups: {g: ['run true']}}]",
+		"env cmd":   "settings: {base: x}\nphases: [{name: a, groups: {g: ['env NOVALUE']}}]",
+		"platform":  "settings: {base: x, platforms: [amd64]}\nphases: [{name: a, groups: {g: ['run true']}}]",
+		"tag":       "settings: {base: x, tags: ['a:b']}\nphases: [{name: a, groups: {g: ['run true']}}]",
+		"phase env": "settings: {base: x}\nphases: [{name: a, env: {'a-b': c}, groups: {g: ['run true']}}]",
+	}
+	for name, s := range bad {
+		if _, err := Parse([]byte(s), nil); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}

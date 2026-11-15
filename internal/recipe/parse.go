@@ -23,6 +23,12 @@ type rawSettings struct {
 	Validation string            `yaml:"validation"`
 	Toolbox    string            `yaml:"toolbox"`
 	Args       map[string]string `yaml:"args"`
+
+	Description string            `yaml:"description"`
+	Labels      map[string]string `yaml:"labels"`
+	Env         map[string]string `yaml:"env"`
+	Platforms   []string          `yaml:"platforms"`
+	Tags        []string          `yaml:"tags"`
 }
 
 type rawStage struct {
@@ -34,6 +40,7 @@ type rawPhase struct {
 	Name       string             `yaml:"name"`
 	Validation string             `yaml:"validation"`
 	Shared     []string           `yaml:"shared"`
+	Env        map[string]string  `yaml:"env"`
 	Include    string             `yaml:"include"`
 	Groups     map[string]cmdList `yaml:"groups"`
 }
@@ -89,8 +96,28 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Validation: raw.Settings.Validation,
 			Toolbox:    raw.Settings.Toolbox,
 			Args:       args,
+
+			Description: ExpandArgs(raw.Settings.Description, args),
+			Labels:      expandMap(raw.Settings.Labels, args),
+			Env:         expandMap(raw.Settings.Env, args),
+			Platforms:   raw.Settings.Platforms,
+			Tags:        raw.Settings.Tags,
 		},
 		Prepare: map[string]Stage{},
+	}
+	if err := checkEnvNames("settings.env", r.Settings.Env); err != nil {
+		return nil, err
+	}
+	for _, p := range r.Settings.Platforms {
+		if os, arch, ok := strings.Cut(p, "/"); !ok || os == "" || arch == "" {
+			return nil, errf("recipe: settings.platforms: %q is not of the form os/arch", p)
+		}
+	}
+	for i, t := range r.Settings.Tags {
+		r.Settings.Tags[i] = ExpandArgs(t, args)
+		if r.Settings.Tags[i] == "" || strings.ContainsAny(r.Settings.Tags[i], " /:") {
+			return nil, errf("recipe: settings.tags: %q is not a valid tag", t)
+		}
 	}
 	if r.Settings.Base == "" {
 		return nil, errf("recipe: settings.base is required")
@@ -158,7 +185,11 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Name:       rp.Name,
 			Validation: rp.Validation,
 			Shared:     rp.Shared,
+			Env:        expandMap(rp.Env, args),
 			Groups:     map[string][]Command{},
+		}
+		if err := checkEnvNames(fmt.Sprintf("phase %q: env", rp.Name), ph.Env); err != nil {
+			return nil, err
 		}
 		for gname, lines := range rp.Groups {
 			if len(lines) == 0 {
@@ -221,4 +252,24 @@ func (r *Recipe) Graph() string {
 		}
 	}
 	return b.String()
+}
+
+func expandMap(m map[string]string, args map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = ExpandArgs(v, args)
+	}
+	return out
+}
+
+func checkEnvNames(where string, env map[string]string) error {
+	for k := range env {
+		if !validEnvName(k) {
+			return errf("recipe: %s: %q is not a valid variable name", where, k)
+		}
+	}
+	return nil
 }

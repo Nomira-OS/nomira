@@ -58,6 +58,7 @@ type flatPhase struct {
 	Name       string
 	Validation string
 	Shared     []string
+	Env        map[string]string
 	Groups     map[string][]string
 }
 
@@ -123,7 +124,7 @@ func (l *loader) phases(from string, in []rawPhase) ([]flatPhase, error) {
 	var out []flatPhase
 	for i, rp := range in {
 		if rp.Include != "" {
-			if rp.Name != "" || rp.Validation != "" || len(rp.Shared) > 0 || len(rp.Groups) > 0 {
+			if rp.Name != "" || rp.Validation != "" || len(rp.Shared) > 0 || len(rp.Env) > 0 || len(rp.Groups) > 0 {
 				return nil, fmt.Errorf("%s: phases[%d]: include cannot be combined with other keys", from, i)
 			}
 			err := l.open(from, rp.Include, func(name string, data []byte) error {
@@ -155,7 +156,7 @@ func (l *loader) phases(from string, in []rawPhase) ([]flatPhase, error) {
 			}
 			continue
 		}
-		fp := flatPhase{Name: rp.Name, Validation: rp.Validation, Shared: rp.Shared, Groups: map[string][]string{}}
+		fp := flatPhase{Name: rp.Name, Validation: rp.Validation, Shared: rp.Shared, Env: rp.Env, Groups: map[string][]string{}}
 		for g, cl := range rp.Groups {
 			lines, err := l.commands(from, cl)
 			if err != nil {

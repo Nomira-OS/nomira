@@ -83,10 +83,16 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 
 	// Carry the base image's config (entrypoint, env, labels …) so the
 	// exported image stays bootable; bootc images live or die by it.
-	out := client.NewResult()
-	if cfg, cerr := resolveBaseConfig(ctx, c, r.Settings.Base); cerr == nil && len(cfg) > 0 {
-		out.AddMeta(exptypes.ExporterImageConfigKey, cfg)
+	base, err := resolveBaseConfig(ctx, c, r.Settings.Base)
+	if err != nil {
+		return nil, fmt.Errorf("read image config of base %s: %w", r.Settings.Base, err)
 	}
+	cfg, err := imageConfig(base, r.Settings.Description, r.Settings.Labels)
+	if err != nil {
+		return nil, err
+	}
+	out := client.NewResult()
+	out.AddMeta(exptypes.ExporterImageConfigKey, cfg)
 	out.SetRef(ref)
 	return out, nil
 }

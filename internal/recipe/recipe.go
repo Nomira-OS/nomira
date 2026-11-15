@@ -7,7 +7,7 @@
 //	  name: meinsystem
 //	  base: ghcr.io/…/arch-bootc@sha256:…
 //	  validation: strict            # file default: strict | allow-identical
-//	  toolbox: docker.io/library/busybox:1.36
+//	  toolbox: docker.io/library/busybox:1.36.1
 //	  args:
 //	    SNAPSHOT: "2026/11/10"      # overridable via --build-arg / --opt build-arg:SNAPSHOT
 //	prepare:                        # optional named stages (multistage)
@@ -46,7 +46,8 @@ const (
 )
 
 // DefaultToolbox is the image used for write-set collection execs.
-const DefaultToolbox = "docker.io/library/busybox:1.36"
+// renovate: datasource=docker
+const DefaultToolbox = "docker.io/library/busybox:1.36.1"
 
 // Recipe is the fully parsed and schema-validated build description.
 type Recipe struct {
@@ -62,6 +63,15 @@ type Settings struct {
 	Validation string            // file default policy
 	Toolbox    string            // image for write-set collection
 	Args       map[string]string // declared build args with defaults
+
+	Description string            // becomes the org.opencontainers.image.description label
+	Labels      map[string]string // image labels
+	Env         map[string]string // build-time environment for every run
+	// Platforms and Tags are declarations for the caller (CLI, CI): the
+	// frontend validates and reports them via `inspect` but builds for the
+	// platform BuildKit asks for and never tags anything itself.
+	Platforms []string
+	Tags      []string
 }
 
 // Stage is a named prepare stage with its own base image.
@@ -73,8 +83,9 @@ type Stage struct {
 // Phase is one serial pipeline step containing independent groups.
 type Phase struct {
 	Name       string
-	Validation string   // empty = inherit file default
-	Shared     []string // allowlist: exact paths, or prefixes when ending in "/"
+	Validation string            // empty = inherit file default
+	Shared     []string          // allowlist: exact paths, or prefixes when ending in "/"
+	Env        map[string]string // build-time environment for the phase's runs
 	Groups     map[string][]Command
 }
 
@@ -117,13 +128,24 @@ type CacheMount struct {
 
 // RunCmd executes a shell script via `/bin/sh -c`.
 type RunCmd struct {
-	Mounts []CacheMount
-	Script string
-	raw    string
+	Mounts  []CacheMount
+	NoCache bool // always execute, even if BuildKit has the step cached
+	Script  string
+	raw     string
 }
 
 func (RunCmd) isCommand()    {}
 func (c RunCmd) Raw() string { return c.raw }
+
+// EnvCmd sets a build-time environment variable for the commands that
+// follow it in the same group or stage.
+type EnvCmd struct {
+	Name, Value string
+	raw         string
+}
+
+func (EnvCmd) isCommand()    {}
+func (c EnvCmd) Raw() string { return c.raw }
 
 // CopyCmd copies from the build context or a prepare stage into the image.
 type CopyCmd struct {

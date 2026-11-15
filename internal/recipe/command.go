@@ -8,7 +8,8 @@ import (
 
 // ParseCommand parses one verb-first command string:
 //
-//	run [--mount=type=cache,target=/path[,id=ID][,sharing=shared|private|locked]]... <shell script>
+//	run [--no-cache] [--mount=type=cache,target=/path[,id=ID][,sharing=shared|private|locked]]... <shell script>
+//	env NAME=VALUE
 //	copy [--from=STAGE] [--chmod=0644] [--chown=UID:GID] <src>... <dst>
 //
 // For `run`, everything after the flags is passed verbatim to `/bin/sh -c`
@@ -25,8 +26,10 @@ func ParseCommand(raw string) (Command, error) {
 		return parseRun(raw, rest)
 	case "copy":
 		return parseCopy(raw, rest)
+	case "env":
+		return parseEnv(raw, rest)
 	default:
-		return nil, errf("unknown verb %q (expected \"run\" or \"copy\")", verb)
+		return nil, errf("unknown verb %q (expected \"run\", \"copy\" or \"env\")", verb)
 	}
 }
 
@@ -40,6 +43,8 @@ func parseRun(raw, rest string) (Command, error) {
 		var flag string
 		flag, rest = splitWord(rest)
 		switch {
+		case flag == "--no-cache":
+			cmd.NoCache = true
 		case strings.HasPrefix(flag, "--mount="):
 			m, err := parseCacheMount(strings.TrimPrefix(flag, "--mount="))
 			if err != nil {
@@ -56,6 +61,31 @@ func parseRun(raw, rest string) (Command, error) {
 	}
 	cmd.Script = script
 	return cmd, nil
+}
+
+// parseEnv parses `env NAME=VALUE`. Everything after the first "=" is the
+// value, so values may contain spaces; one variable per command.
+func parseEnv(raw, rest string) (Command, error) {
+	name, value, ok := strings.Cut(strings.TrimSpace(rest), "=")
+	if !ok || !validEnvName(name) {
+		return nil, errf("env: expected NAME=VALUE")
+	}
+	return EnvCmd{Name: name, Value: value, raw: raw}, nil
+}
+
+func validEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_', r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z':
+		case r >= '0' && r <= '9' && i > 0:
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func parseCacheMount(spec string) (CacheMount, error) {

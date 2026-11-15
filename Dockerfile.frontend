@@ -3,7 +3,7 @@
 #   # syntax=ghcr.io/nomira-os/nomira:1
 #
 # Cross-compiles on the build platform (no QEMU needed for multi-arch).
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.11-alpine AS build
 ARG TARGETOS TARGETARCH
 WORKDIR /src
 COPY . .

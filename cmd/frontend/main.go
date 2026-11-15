@@ -112,10 +112,16 @@ func inspect() int {
 		Groups []string `json:"groups"`
 	}
 	out := struct {
-		Name   string  `json:"name"`
-		Base   string  `json:"base"`
-		Phases []phase `json:"phases"`
-	}{Name: r.Settings.Name, Base: r.Settings.Base}
+		Name        string   `json:"name"`
+		Description string   `json:"description,omitempty"`
+		Base        string   `json:"base"`
+		Platforms   []string `json:"platforms,omitempty"`
+		Tags        []string `json:"tags,omitempty"`
+		Phases      []phase  `json:"phases"`
+	}{
+		Name: r.Settings.Name, Description: r.Settings.Description, Base: r.Settings.Base,
+		Platforms: r.Settings.Platforms, Tags: r.Settings.Tags,
+	}
 	for _, p := range r.Phases {
 		out.Phases = append(out.Phases, phase{Name: p.Name, Groups: p.GroupNames()})
 	}

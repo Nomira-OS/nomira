@@ -1,51 +1,38 @@
 # syntax=ghcr.io/nomira-os/nomira:1
 #
-# Beispiel: Arch-bootc-System mit kmscon, NetworkManager, AppArmor- und
-# xe-Kernelparametern. Gruppen innerhalb einer Phase sind deklariert
-# unabhängig und werden im Build auf Disjunktheit geprüft.
+# Beispiel: ein kleines System auf dem nomira-Basis-Image. Gruppen innerhalb
+# einer Phase sind deklariert unabhängig und werden im Build auf
+# Disjunktheit geprüft.
+#
+# Der Paketstand kommt vom Basis-Image: Dessen mirrorlist zeigt auf den
+# Snapshot im Arch Linux Archive, der zum Tag gehört.
 
 settings:
   name: meinsystem
-  base: ghcr.io/bootcrew/arch-bootc:latest   # TODO: per @sha256-Digest pinnen
+  description: Beispielsystem mit kmscon, NetworkManager und AppArmor
+  base: ghcr.io/nomira-os/nomira-image:2026.11.13
   validation: strict
-  args:
-    SNAPSHOT: "2026/11/10"                   # Arch Linux Archive; --build-arg SNAPSHOT=… überschreibt
-
-prepare:
-  aurbuild:
-    from: docker.io/library/archlinux:base-devel
-    commands:
-      - run --mount=type=cache,target=/var/cache/pacman/pkg pacman -Syu --noconfirm git sudo
-      - |
-        run useradd -m build && echo 'build ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/build && \
-            su build -c 'cd && git clone https://aur.archlinux.org/example-pkg.git && \
-            cd example-pkg && makepkg -s --noconfirm' && \
-            mkdir -p /out && cp /home/build/example-pkg/*.pkg.tar.zst /out/
+  labels:
+    org.opencontainers.image.source: https://github.com/Nomira-OS/nomira
+  env:
+    LANG: C.UTF-8
 
 phases:
-  - name: base
+  - name: packages
     groups:
       system:
-        - |
-          run printf 'Server=https://archive.archlinux.org/repos/%s/$repo/os/$arch\n' '${SNAPSHOT}' \
-              > /etc/pacman.d/mirrorlist
-        - run --mount=type=cache,target=/var/cache/pacman/pkg pacman -Syu --needed --noconfirm kmscon networkmanager apparmor python
+        - run --mount=type=cache,target=/usr/lib/sysimage/cache/pacman/pkg pacman -S --needed --noconfirm kmscon networkmanager
 
   - name: configs
-    shared:
-      - /usr/lib/tmpfiles.d/
     groups:
       kmscon:
         - copy --chmod=0644 files/kmscon/ /etc/kmscon/
       networkmanager:
-        - copy --chmod=0600 configs/nm/ /etc/NetworkManager/system-connections/
+        - copy --chmod=0600 files/nm/ /etc/NetworkManager/system-connections/
       boot:
-        - run python3 /dev/null || true
         - copy files/kargs/ /usr/lib/bootc/kargs.d/
-      aur:
-        - copy --from=aurbuild /out/ /var/tmp/aur/
 
   - name: finish
     groups:
       enable:
-        - run systemctl enable kmscon NetworkManager apparmor && pacman -U --noconfirm /var/tmp/aur/*.pkg.tar.zst || true
+        - run systemctl enable kmsconvt@tty1.service NetworkManager.service

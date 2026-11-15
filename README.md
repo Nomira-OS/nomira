@@ -25,42 +25,67 @@ S' = Merge(S, Δ₁ … Δₙ)
 # syntax=ghcr.io/nomira-os/nomira:1
 settings:
   name: meinsystem
-  base: ghcr.io/…/arch-bootc@sha256:…
-  validation: strict                # Datei-Default: strict | allow-identical
+  description: Mein System                  # wird zum Label org.opencontainers.image.description
+  base: ghcr.io/nomira-os/nomira-image:2026.11.13
+  validation: strict                        # Datei-Default: strict | allow-identical
+  labels:                                   # Labels am fertigen Image
+    org.example.owner: ich
+  env:                                      # Umgebung für alle run-Befehle (nur beim Bauen)
+    LANG: C.UTF-8
   args:
-    SNAPSHOT: "2026/11/10"          # ${SNAPSHOT} in Befehlen; --build-arg überschreibt
+    VERSION: "1.0"                          # ${VERSION} in Befehlen; --build-arg überschreibt
+  platforms: [linux/amd64]                  # Angabe für CLI und CI, siehe unten
+  tags: ["${VERSION}", stable]              # Angabe für CLI und CI, siehe unten
 
-prepare:                            # optionale benannte Stages (Multistage)
+prepare:                                    # optionale benannte Stages (Multistage)
   aurbuild:
     from: docker.io/library/archlinux:base-devel
     commands:
-      - run pacman -Syu --noconfirm git
+      - run --no-cache git clone https://aur.archlinux.org/example.git /src
 
-phases:                             # Liste → Reihenfolge zählt
-  - name: base
-    groups:                         # Mapping → Gruppen unabhängig, Key = Name
-      system:                       # einzelne Gruppe = serieller Fall, keine Validierung
-        - run --mount=type=cache,target=/var/cache/pacman/pkg pacman -Syu --needed --noconfirm kmscon
+phases:                                     # Liste: Reihenfolge zählt
+  - name: packages
+    groups:                                 # Mapping: Gruppen unabhängig, Key = Name
+      system:                               # einzelne Gruppe = serieller Fall, keine Validierung
+        - run --mount=type=cache,target=/usr/lib/sysimage/cache/pacman/pkg pacman -S --needed --noconfirm kmscon
   - name: configs
-    validation: allow-identical     # Phase überschreibt Default
-    shared: [/usr/lib/tmpfiles.d/]  # Allowlist (Suffix "/" = Präfix)
+    validation: allow-identical             # Phase überschreibt Default
+    shared: [/usr/lib/tmpfiles.d/]          # Allowlist (Suffix "/" = Präfix)
+    env: {MAKEFLAGS: -j4}                   # Umgebung für diese Phase
     groups:
       kmscon:
+        - env THEME=dark                    # gilt für die folgenden Befehle der Gruppe
         - copy --chmod=0644 files/kmscon/ /etc/kmscon/
       aur:
-        - copy --from=aurbuild /out/ /var/tmp/aur/
+        - copy --from=aurbuild /out/ /usr/lib/aur/
 ```
 
 Befehle sind Strings mit Verb am Anfang (Mehrzeiler als YAML-Blockskalar):
 
 | Befehl | Flags |
 |---|---|
-| `run <shell>` | `--mount=type=cache,target=/pfad[,id=…][,sharing=shared\|private\|locked]` |
+| `run <shell>` | `--no-cache`, `--mount=type=cache,target=/pfad[,id=…][,sharing=shared\|private\|locked]` |
 | `copy <src>… <dst>` | `--from=<stage>`, `--chmod=0644`, `--chown=UID:GID` |
+| `env NAME=WERT` | keine; alles nach dem ersten `=` ist der Wert |
 
-`${NAME}` wird nur für in `settings.args` deklarierte Args ersetzt; `$repo`
-u. ä. bleiben unangetastet. Ein geänderter Arg invalidiert genau die
-Befehle, die ihn verwenden (korrekte Cache-Semantik).
+**Args:** `${NAME}` wird nur für in `settings.args` deklarierte Args ersetzt;
+`$repo` u. ä. bleiben unangetastet. Ein geänderter Arg invalidiert genau die
+Befehle, die ihn verwenden.
+
+**Umgebung:** `settings.env` gilt für alle `run`-Befehle, `env` an einer
+Phase für deren Gruppen, der Befehl `env` für den Rest seiner Gruppe. Das
+Speziellere gewinnt. Die Variablen gelten nur beim Bauen und landen nicht
+in der Image-Konfiguration.
+
+**`run --no-cache`:** Der Schritt läuft immer, auch wenn BuildKit ihn im
+Cache hat. Danach läuft alles neu, was auf ihm aufbaut: der Rest seiner
+Gruppe und alle folgenden Phasen. Solche Schritte gehören deshalb in eine
+eigene Gruppe möglichst weit hinten oder in eine `prepare`-Stage.
+
+**`platforms` und `tags`:** Das Frontend prüft beide Angaben und gibt sie
+über `inspect` aus, wertet sie aber nicht aus. Für welche Architektur
+gebaut und unter welchen Tags veröffentlicht wird, entscheidet der
+Aufrufer (CLI oder CI).
 
 ## Aufteilen auf mehrere Dateien
 
@@ -92,8 +117,8 @@ weiterhin auf den Build-Kontext, nicht auf die eingebundene Datei.
 ## Bauen eines Recipes
 
 Das Frontend-Image wird von der CI (`.github/workflows/ci.yml`) bei jedem
-Push auf `main` nach `ghcr.io/nomira-os/nomira` veröffentlicht (Tags `1`,
-`latest`, `sha-…`; bei `v*`-Tags zusätzlich die Versionsnummer), für
+Push auf `main` nach `ghcr.io/nomira-os/nomira` veröffentlicht (Tags `1`
+und `sha-…`; bei `v*`-Tags zusätzlich die Versionsnummer), für
 `linux/amd64` und `linux/arm64`. Lokal bauen geht weiterhin:
 
 ```sh
@@ -171,6 +196,6 @@ Leerzeichen-Pfade).
 - Xattrs/Hardlinks werden vom Lister noch nicht als eigene Writes erfasst
   (concept.md §10).
 - Der Lister braucht ein Toolbox-Image mit busybox-Werkzeugen
-  (`settings.toolbox`, Default `docker.io/library/busybox:1.36`).
+  (`settings.toolbox`, Default `docker.io/library/busybox:1.36.1`).
 - Plattform folgt dem Build-Host; Multi-Arch ist offen.
 - Gegen BuildKit v0.35.0 gebaut; MergeOp/DiffOp brauchen ≥ 0.10.
