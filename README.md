@@ -361,13 +361,20 @@ two shell scripts the build uses against synthetic trees.
 ## Status and known limits
 
 - Tried in a real build: phases, groups, the conflict check and its
-  abort. Covered by tests but **not yet run in a real build**: includes,
+  abort, the latter with the previous way of collecting the write set. Covered by tests but **not yet run in a real build**: includes,
   `env`, `run --no-cache`, labels, collectors, the long form of groups,
-  `expects`, and building groups without `run` apart from the state
-  before them.
-- Collecting the write set hashes the whole upper tree of a group. A
-  phase with a single group that uses `run` skips diff, merge and
+  `expects`, building groups without `run` apart from the state
+  before them, and reading the write set from the layer.
+- The write set of a group is read from its layer, so only the files it
+  wrote are hashed. For a group with `run` the trees before and after
+  are additionally walked, without reading files, to find deletions.
+  Every file in the layer counts as written, also one that was rewritten
+  with the same content: its layer would still cover what a sibling
+  writes to that path. `validation: allow-identical` permits that case.
+- A phase with a single group that uses `run` skips diff, merge and
   validation entirely.
+- The checks of a phase run in parallel and are cached by BuildKit; they
+  only run again when the group or the state before it changed.
 - `copy` does not support paths with spaces on the command line (the
   validation itself does); `--chown` is numeric only.
 - `copy --from` inside a `prepare` stage is not supported yet.

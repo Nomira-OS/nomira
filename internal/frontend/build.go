@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
@@ -57,8 +58,8 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	// phase are disjoint. A problem stops the build before anything is
 	// merged on top of it or exported.
 	b, err := compile.Compile(r, compile.Hooks{
-		Decide: func(ph recipe.Phase, group string, lower, upper llb.State) (bool, string, error) {
-			return independent(ctx, c, r, ph, group, lower, upper)
+		Decide: func(ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
+			return dependent(ctx, c, r, ph, lower, alone)
 		},
 		PhaseDone: func(plan compile.PhasePlan) error {
 			if err := checkExpects(ctx, c, plan); err != nil {
@@ -129,42 +130,60 @@ func recipeReader(ctx context.Context, c client.Client, filename string) (recipe
 	}, nil
 }
 
-// independent runs the guard for a group without run. It reports whether
-// merging the group, built on an empty state, gives the same tree as
-// building it on lower. If not, the group is built on lower, which is
-// always correct but ties its cache to lower. That is easy to miss, so it
-// is reported as a build warning that names every path in the way.
-func independent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe.Phase, group string, lower, upper llb.State) (bool, string, error) {
-	st := compile.GuardState(r.Settings.Toolbox, lower, upper, ph.Name, group)
-	def, err := st.Marshal(ctx)
-	if err != nil {
-		return false, "", err
+// dependent runs the guard for the groups of a phase that have no run, in
+// parallel, and returns those that may not be built on an empty state,
+// each with a short reason.
+//
+// For such a group, merging would not give the same tree as building on
+// lower. It is built on lower instead, which is always correct but ties
+// its cache to lower. That is easy to miss, so it is reported as a build
+// warning that names every path in the way.
+func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
+	var mu sync.Mutex
+	rejected := map[string]string{}
+	eg, ectx := errgroup.WithContext(ctx)
+	for group, upper := range alone {
+		group, upper := group, upper
+		eg.Go(func() error {
+			st := compile.GuardState(r.Settings.Toolbox, lower, upper, ph.Name, group)
+			def, err := st.Marshal(ectx)
+			if err != nil {
+				return err
+			}
+			data, err := solveAndRead(ectx, c, st, compile.GuardPath)
+			if err != nil {
+				return fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
+			}
+			findings := guardFindings(string(data))
+			if len(findings) == 0 {
+				return nil
+			}
+			msg := fmt.Sprintf("phase %q: group %q has no run but is not independent of the state before it. "+
+				"It is built on that state and will be rebuilt whenever the base image or an earlier phase changes.",
+				ph.Name, group)
+			detail := make([][]byte, 0, len(findings)+1)
+			for _, f := range findings {
+				detail = append(detail, []byte(f))
+			}
+			detail = append(detail, []byte("To make the group independent, copy to a path that is not affected, or accept the rebuild."))
+			if dgst, err := def.Head(); err == nil {
+				// A warning that cannot be delivered must not fail the build.
+				_ = c.Warn(ectx, dgst, msg, client.WarnOpts{Level: 1, Detail: detail})
+			}
+			reason := findings[0]
+			if len(findings) > 1 {
+				reason += fmt.Sprintf(" (and %d more)", len(findings)-1)
+			}
+			mu.Lock()
+			rejected[group] = reason
+			mu.Unlock()
+			return nil
+		})
 	}
-	data, err := solveAndRead(ctx, c, st, compile.GuardPath)
-	if err != nil {
-		return false, "", fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
+	if err := eg.Wait(); err != nil {
+		return nil, err
 	}
-	findings := guardFindings(string(data))
-	if len(findings) == 0 {
-		return true, "", nil
-	}
-	msg := fmt.Sprintf("phase %q: group %q has no run but is not independent of the state before it. "+
-		"It is built on that state and will be rebuilt whenever the base image or an earlier phase changes.",
-		ph.Name, group)
-	detail := make([][]byte, 0, len(findings)+1)
-	for _, f := range findings {
-		detail = append(detail, []byte(f))
-	}
-	detail = append(detail, []byte("To make the group independent, copy to a path that is not affected, or accept the rebuild."))
-	if dgst, err := def.Head(); err == nil {
-		// A warning that cannot be delivered must not fail the build.
-		_ = c.Warn(ctx, dgst, msg, client.WarnOpts{Level: 1, Detail: detail})
-	}
-	reason := findings[0]
-	if len(findings) > 1 {
-		reason += fmt.Sprintf(" (and %d more)", len(findings)-1)
-	}
-	return false, reason, nil
+	return rejected, nil
 }
 
 // guardFindings turns the guard's output (see compile/guard.sh) into
@@ -251,11 +270,12 @@ func validatePhase(ctx context.Context, c client.Client, r *recipe.Recipe, plan 
 	for _, g := range plan.Phase.BuildGroupNames() {
 		g := g
 		eg.Go(func() error {
-			lower := &plan.Input
-			if plan.Isolated[g] {
-				lower = nil
+			var lower, upper *llb.State
+			if !plan.Isolated[g] {
+				up := plan.Uppers[g]
+				lower, upper = &plan.Input, &up
 			}
-			st := compile.WriteSetState(r.Settings.Toolbox, lower, plan.Uppers[g], plan.Phase.Name, g)
+			st := compile.WriteSetState(r.Settings.Toolbox, lower, upper, plan.Layers[g], plan.Phase.Name, g)
 			data, err := solveAndRead(ectx, c, st, compile.WritesPath)
 			if err != nil {
 				return fmt.Errorf("phase %q group %q: collect write set: %w", plan.Phase.Name, g, err)

@@ -41,6 +41,10 @@ type PhasePlan struct {
 	Uppers map[string]llb.State
 	// Isolated marks the groups that were built on an empty state.
 	Isolated map[string]bool
+	// Layers maps group name → what the group adds to Input: the diff of a
+	// group with run, or the whole result of an isolated group. Empty for a
+	// phase that is not merged.
+	Layers map[string]llb.State
 	// Output is the phase result.
 	Output llb.State
 	// Validate reports whether this phase needs write-set validation.
@@ -61,11 +65,13 @@ type Build struct {
 // Hooks let the caller look at real build results while the graph is
 // assembled. Both are optional.
 type Hooks struct {
-	// Decide is asked for every group without run whether it may be built
-	// on an empty state. lower is the phase input, upper the group built on
-	// an empty state. Without Decide the answer is yes. On a no, reason
-	// says why in a few words; it is shown next to the group's steps.
-	Decide func(ph recipe.Phase, group string, lower, upper llb.State) (ok bool, reason string, err error)
+	// Decide is asked once per phase which of its groups without run may
+	// not be built on an empty state. lower is the phase input, alone maps
+	// each such group to its result on an empty state. The answer maps the
+	// rejected groups to a reason in a few words, which is shown next to
+	// the group's steps. Without Decide all of them are accepted. One call
+	// per phase lets the caller check the groups in parallel.
+	Decide func(ph recipe.Phase, lower llb.State, alone map[string]llb.State) (rejected map[string]string, err error)
 	// PhaseDone is called with each finished plan before the next phase is
 	// compiled on top of it. An error stops the compilation, so a conflict
 	// is reported before anything builds on the merged result.
@@ -101,6 +107,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			Input:    cur,
 			Uppers:   map[string]llb.State{},
 			Isolated: map[string]bool{},
+			Layers:   map[string]llb.State{},
 		}
 		env := mergeEnv(r.Settings.Env, ph.Env)
 
@@ -115,32 +122,39 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			}
 		} else {
 			names := ph.BuildGroupNames()
+			// Groups without run, built on an empty state.
+			alone := map[string]llb.State{}
 			for _, g := range names {
-				scope := fmt.Sprintf("%s/%s", ph.Name, g)
-				grp := ph.Groups[g]
-				if !grp.HasRun() {
-					alone, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, b.Stages, scope)
+				if grp := ph.Groups[g]; !grp.HasRun() {
+					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, b.Stages, fmt.Sprintf("%s/%s", ph.Name, g))
 					if err != nil {
 						return nil, err
 					}
-					ok := true
-					if hooks.Decide != nil {
-						var reason string
-						if ok, reason, err = hooks.Decide(ph, g, cur, alone); err != nil {
-							return nil, err
-						}
-						if !ok && reason != "" {
-							// Visible in the progress output of every build.
-							scope += ", depends on earlier state: " + reason
-						}
-					}
-					if ok {
-						plan.Uppers[g] = alone
+					alone[g] = st
+				}
+			}
+			var rejected map[string]string
+			if hooks.Decide != nil && len(alone) > 0 {
+				var err error
+				if rejected, err = hooks.Decide(ph, cur, alone); err != nil {
+					return nil, err
+				}
+			}
+			for _, g := range names {
+				scope := fmt.Sprintf("%s/%s", ph.Name, g)
+				if st, ok := alone[g]; ok {
+					reason, no := rejected[g]
+					if !no {
+						plan.Uppers[g] = st
 						plan.Isolated[g] = true
 						continue
 					}
+					if reason != "" {
+						// Visible in the progress output of every build.
+						scope += ", depends on earlier state: " + reason
+					}
 				}
-				upper, err := applyCommands(cur, grp.Commands, mergeEnv(env), ctxSrc, b.Stages, scope)
+				upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, b.Stages, scope)
 				if err != nil {
 					return nil, err
 				}
@@ -161,6 +175,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 						layer = llb.Diff(cur, layer,
 							llb.WithCustomNamef("[%s/%s] diff", ph.Name, g))
 					}
+					plan.Layers[g] = layer
 					merge = append(merge, layer)
 				}
 				plan.Output = llb.Merge(merge,

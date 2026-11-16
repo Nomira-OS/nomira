@@ -1,21 +1,43 @@
 #!/bin/sh
-# nomira write-set lister: compares lower (S) and upper (R) trees and emits
-#   W <sha256:mode:uid:gid> <path>   added or changed file/symlink
+# nomira write-set lister. Emits what a group changes:
+#   W <sha256:mode:uid:gid> <path>   file or symlink the group writes
 #   D <path>                         deleted file/symlink
 #   D <path>/                        deleted directory (prefix semantics)
-# Token is space-free (symlinks hash their target string), so paths may
-# contain spaces. Paths containing newlines are a known limitation of the
-# line protocol. Needs only busybox tools (find, sort, comm, stat,
-# sha256sum, readlink, cmp-free).
+#
+# Three trees, all read-only:
+#   D  the group's layer: exactly what the merge will lay on top. Every
+#      file and symlink in it is a write, also one whose content equals
+#      the one below: the layer would still cover what a sibling group
+#      writes to that path. Only these files are hashed.
+#   L  the tree before the group, U the tree after it. They are walked but
+#      never read, to find what the group deleted; a layer mounted on its
+#      own does not show deletions. Both are absent for a group that was
+#      built on an empty tree and cannot delete anything.
+#
+# Only regular files and symlinks count, so whatever a snapshotter may
+# leave in a layer to mark a deletion is ignored. Token is space-free
+# (symlinks hash their target string), so paths may contain spaces. Paths
+# containing newlines are a known limitation of the line protocol. Needs
+# only busybox tools (find, sort, comm, stat, sha256sum, readlink).
 set -eu
-L="${1:-/nomira/l}"; U="${2:-/nomira/u}"; O="${3:-/nomira/out}"; T="${4:-/nomira/tmp}"
-# A group built on an empty state has no lower tree mounted.
-mkdir -p "$O" "$T" "$L"
-( cd "$U" && find . -mindepth 1 \( -type f -o -type l \) ) | sort > "$T/uf"
-( cd "$L" && find . -mindepth 1 \( -type f -o -type l \) ) | sort > "$T/lf"
-( cd "$U" && find . -mindepth 1 -type d ) | sort > "$T/ud"
-( cd "$L" && find . -mindepth 1 -type d ) | sort > "$T/ld"
+L="${1:-/nomira/l}"; U="${2:-/nomira/u}"; D="${3:-/nomira/d}"
+O="${4:-/nomira/out}"; T="${5:-/nomira/tmp}"
+mkdir -p "$O" "$T"
 : > "$O/writes"
+
+if [ -d "$L" ] && [ -d "$U" ]; then
+  ( cd "$U" && find . -mindepth 1 \( -type f -o -type l \) ) | LC_ALL=C sort > "$T/uf"
+  ( cd "$L" && find . -mindepth 1 \( -type f -o -type l \) ) | LC_ALL=C sort > "$T/lf"
+  ( cd "$U" && find . -mindepth 1 -type d ) | LC_ALL=C sort > "$T/ud"
+  ( cd "$L" && find . -mindepth 1 -type d ) | LC_ALL=C sort > "$T/ld"
+  LC_ALL=C comm -23 "$T/lf" "$T/uf" | while IFS= read -r p; do
+    printf 'D %s\n' "${p#./}" >> "$O/writes"
+  done
+  LC_ALL=C comm -23 "$T/ld" "$T/ud" | while IFS= read -r p; do
+    printf 'D %s/\n' "${p#./}" >> "$O/writes"
+  done
+fi
+
 hashof() {
   if [ -L "$1" ]; then
     printf 'link:%s' "$(readlink "$1")" | sha256sum | cut -d' ' -f1
@@ -23,20 +45,7 @@ hashof() {
     sha256sum "$1" | cut -d' ' -f1
   fi
 }
-comm -23 "$T/lf" "$T/uf" | while IFS= read -r p; do
-  printf 'D %s\n' "${p#./}" >> "$O/writes"
-done
-comm -23 "$T/ld" "$T/ud" | while IFS= read -r p; do
-  printf 'D %s/\n' "${p#./}" >> "$O/writes"
-done
+( cd "$D" && find . -mindepth 1 \( -type f -o -type l \) ) | LC_ALL=C sort > "$T/df"
 while IFS= read -r p; do
-  f="${p#./}"
-  uh="$(hashof "$U/$p")"
-  um="$(stat -c '%a:%u:%g' "$U/$p")"
-  if [ -e "$L/$p" ] || [ -L "$L/$p" ]; then
-    lh="$(hashof "$L/$p")"
-    lm="$(stat -c '%a:%u:%g' "$L/$p")"
-    if [ "$uh" = "$lh" ] && [ "$um" = "$lm" ]; then continue; fi
-  fi
-  printf 'W %s:%s %s\n' "$uh" "$um" "$f" >> "$O/writes"
-done < "$T/uf"
+  printf 'W %s:%s %s\n' "$(hashof "$D/$p")" "$(stat -c '%a:%u:%g' "$D/$p")" "${p#./}" >> "$O/writes"
+done < "$T/df"

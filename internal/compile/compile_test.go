@@ -75,9 +75,11 @@ func TestCompileShapes(t *testing.T) {
 	asked := map[string]bool{}
 	done := 0
 	b, err := Compile(r, Hooks{
-		Decide: func(ph recipe.Phase, group string, lower, upper llb.State) (bool, string, error) {
-			asked[ph.Name+"/"+group] = true
-			return true, "", nil
+		Decide: func(ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
+			for g := range alone {
+				asked[ph.Name+"/"+g] = true
+			}
+			return nil, nil
 		},
 		PhaseDone: func(PhasePlan) error { done++; return nil },
 	})
@@ -111,6 +113,20 @@ func TestCompileShapes(t *testing.T) {
 	if _, base := ops(t, feat.Uppers["runs"], "alpine"); !base {
 		t.Error("group with run does not build on the base")
 	}
+	// Both groups have a layer; the isolated one is its own layer.
+	if len(feat.Layers) != 2 {
+		t.Errorf("layers: %d", len(feat.Layers))
+	}
+	if k, base := ops(t, feat.Layers["copies"], "alpine"); base || k["diff"] != 0 {
+		t.Errorf("layer of the isolated group: ops=%v usesBase=%v", k, base)
+	}
+	if k, _ := ops(t, feat.Layers["runs"], ""); k["diff"] != 1 {
+		t.Errorf("layer of the group with run: %v", k)
+	}
+	// The lister of the isolated group sees nothing of the base either.
+	if _, base := ops(t, WriteSetState("docker.io/library/busybox:1", nil, nil, feat.Layers["copies"], "features", "copies"), "alpine"); base {
+		t.Error("write set of an isolated group depends on the base")
+	}
 	// One diff (for the group with run), one merge.
 	if k, _ := ops(t, feat.Output, ""); k["merge"] != 1 || k["diff"] != 1 {
 		t.Errorf("features output: %v", k)
@@ -138,8 +154,12 @@ func TestDecideFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, err := Compile(r, Hooks{
-		Decide: func(recipe.Phase, string, llb.State, llb.State) (bool, string, error) {
-			return false, "/etc/x is a symbolic link", nil
+		Decide: func(_ recipe.Phase, _ llb.State, alone map[string]llb.State) (map[string]string, error) {
+			rejected := map[string]string{}
+			for g := range alone {
+				rejected[g] = "/etc/x is a symbolic link"
+			}
+			return rejected, nil
 		},
 	})
 	if err != nil {
