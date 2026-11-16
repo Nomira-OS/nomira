@@ -26,10 +26,10 @@ printf q > "$U/etc/dir is here/a file"  # spaces, fine
 sh "$here/internal/compile/guard.sh" "$L" "$U" "$O"
 
 expect="$(cat <<'X'
-T etc/os-release
+L etc/os-release
 T etc/plain
 M 750.0.0:755.0.0 etc/strict
-T usr/local
+L usr/local
 T usr/share/thing
 X
 )"

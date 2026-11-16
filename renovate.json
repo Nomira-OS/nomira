@@ -1,4 +1,14 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>Nomira-OS/ci"]
+  "extends": ["local>Nomira-OS/ci"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Images the end-to-end tests run with",
+      "managerFilePatterns": ["/^\\.github/workflows/ci\\.yml$/"],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+_VERSION: (?<currentValue>\\S+)"
+      ]
+    }
+  ]
 }

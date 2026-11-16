@@ -25,10 +25,52 @@ jobs:
         sh hack/test_guard.sh
         go run ./cmd/frontend lint examples/recipe.yml
 
+  # Builds small recipes with a real BuildKit: conflicts, deletions,
+  # collectors, includes, and that groups without run survive a new base
+  # image. See hack/e2e.sh.
+  e2e:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    env:
+      # renovate: datasource=docker depName=moby/buildkit
+      BUILDKIT_VERSION: v0.35.0
+      # renovate: datasource=docker depName=registry
+      REGISTRY_VERSION: 3.0.0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Start a registry and BuildKit
+        run: |
+          # The frontend under test is pushed to a registry on localhost;
+          # BuildKit has to be told that it speaks plain HTTP.
+          docker run -d --name registry --network host "registry:${REGISTRY_VERSION}"
+          printf '[registry."localhost:5000"]\n  http = true\n  insecure = true\n' > "${RUNNER_TEMP}/buildkitd.toml"
+          docker run -d --name buildkitd --privileged --network host \
+            -v "${RUNNER_TEMP}/buildkitd.toml:/etc/buildkit/buildkitd.toml:ro" \
+            -v "${PWD}:/src:ro" \
+            "moby/buildkit:${BUILDKIT_VERSION}"
+          for i in $(seq 1 30); do
+            docker exec buildkitd buildctl debug workers >/dev/null 2>&1 && exit 0
+            sleep 1
+          done
+          docker logs buildkitd
+          exit 1
+      - name: Build the frontend under test
+        run: |
+          docker exec buildkitd buildctl build \
+            --frontend dockerfile.v0 \
+            --local context=/src --local dockerfile=/src \
+            --opt filename=Dockerfile.frontend \
+            --output type=image,name=localhost:5000/nomira:e2e,push=true
+      - name: Run the end-to-end tests
+        run: docker exec -e FRONTEND=localhost:5000/nomira:e2e buildkitd sh /src/hack/e2e.sh
+      - name: BuildKit log
+        if: failure()
+        run: docker logs --tail 200 buildkitd
+
   # Every commit on main is published as an immutable development build,
   # sha-<commit>. Releases are cut by hand with the release workflow.
   image:
-    needs: go
+    needs: [go, e2e]
     permissions:
       contents: read
       packages: write

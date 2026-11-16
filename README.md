@@ -219,15 +219,11 @@ to building on that state if
   other way round.
 
 The fallback is always correct; it only costs the rebuild. Because that
-cost is easy to miss, every build reports it as a warning that names the
-group and each path in the way, and the group's steps carry the note
-`depends on earlier state` in the progress output:
+cost is easy to miss, the steps of such a group say so in the output of
+every build, also when they come from the cache:
 
 ```text
-phase "features": group "sudo" has no run but is not independent of the
-state before it. It is built on that state and will be rebuilt whenever
-the base image or an earlier phase changes.
-  /etc/sudoers.d has mode.uid.gid 750.0.0 there, the group would create it as 755.0.0
+[features/sudo, WARNING: not independent of earlier state: /etc/sudoers.d has mode.uid.gid 750.0.0 there, not 755.0.0] copy files/sudoers-wheel -> /etc/sudoers.d/10-wheel
 ```
 
 ## Splitting a recipe across files
@@ -354,17 +350,24 @@ proxy: it generates a `go.offline.mod` that serves all dependencies via
 build then uses `GOFLAGS="-mod=mod -modfile=go.offline.mod"`. The normal
 `go.mod` is not affected.
 
-Tests: `go test ./...` (parser, conflict check, shape of the build
-graph) plus `hack/test_lister.sh` and `hack/test_guard.sh`, which run the
-two shell scripts the build uses against synthetic trees.
+Tests come in three layers:
+
+- `go test ./...`: parser, conflict check, shape of the build graph.
+- `hack/test_lister.sh` and `hack/test_guard.sh` run the two shell
+  scripts the build uses against synthetic trees.
+- `hack/e2e.sh` builds small recipes with a real BuildKit and checks the
+  results: conflicts between writes and deletions, the policies,
+  collectors, includes and group-local stages, `expects`, that a group
+  without `run` comes from the cache after a change of the base image,
+  and that the fallback keeps symbolic links and directory modes intact.
+  CI runs it on every push; the header of the script says what it needs
+  to run locally.
 
 ## Status and known limits
 
-- Tried in a real build: phases, groups, the conflict check and its
-  abort, the latter with the previous way of collecting the write set. Covered by tests but **not yet run in a real build**: includes,
-  `env`, `run --no-cache`, labels, collectors, the long form of groups,
-  `expects`, building groups without `run` apart from the state
-  before them, and reading the write set from the layer.
+- Everything in this README is covered by the end-to-end tests against
+  BuildKit v0.35.0, except `run --no-cache`, labels and `--chown`.
+  Larger real systems have hardly been built yet.
 - The write set of a group is read from its layer, so only the files it
   wrote are hashed. For a group with `run` the trees before and after
   are additionally walked, without reading files, to find deletions.

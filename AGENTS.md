@@ -41,6 +41,7 @@ go vet ./...
 go test ./...
 sh hack/test_lister.sh                       # tests internal/compile/lister.sh
 sh hack/test_guard.sh                        # tests internal/compile/guard.sh
+sh hack/e2e.sh                               # real builds; needs BuildKit, see its header
 go run ./cmd/frontend lint examples/recipe.yml
 ```
 
@@ -58,6 +59,10 @@ there, not here.
 - **`lister.sh` and `guard.sh`** must run with busybox tools only and are
   covered by `hack/test_lister.sh` and `hack/test_guard.sh`. Extend the test
   when you change a script.
+- **Behaviour in BuildKit needs an end-to-end test.** What a diff contains,
+  what a merge does to links and modes, what is cached: none of that shows
+  in unit tests. Add a case to `hack/e2e.sh` for every change of that kind,
+  and check that the case fails without the change.
 - **The guard must stay conservative.** A group without `run` is built on an
   empty state only if merging provably gives the same tree as building on
   the state before it. When in doubt the guard reports a finding and the

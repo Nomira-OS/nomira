@@ -151,7 +151,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 					}
 					if reason != "" {
 						// Visible in the progress output of every build.
-						scope += ", depends on earlier state: " + reason
+						scope += ", WARNING: not independent of earlier state: " + reason
 					}
 				}
 				upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, b.Stages, scope)

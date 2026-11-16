@@ -132,12 +132,15 @@ func recipeReader(ctx context.Context, c client.Client, filename string) (recipe
 
 // dependent runs the guard for the groups of a phase that have no run, in
 // parallel, and returns those that may not be built on an empty state,
-// each with a short reason.
+// each with the reason.
 //
 // For such a group, merging would not give the same tree as building on
 // lower. It is built on lower instead, which is always correct but ties
-// its cache to lower. That is easy to miss, so it is reported as a build
-// warning that names every path in the way.
+// its cache to lower. That is easy to miss, so the reason becomes part of
+// the name of the group's steps and shows up in the output of every build.
+// (client.Warn would be the natural channel, but a warning is tied to a
+// vertex digest, and the solver's digests differ from those of the LLB
+// definition; such warnings were silently dropped when tried.)
 func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
 	var mu sync.Mutex
 	rejected := map[string]string{}
@@ -146,10 +149,6 @@ func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe
 		group, upper := group, upper
 		eg.Go(func() error {
 			st := compile.GuardState(r.Settings.Toolbox, lower, upper, ph.Name, group)
-			def, err := st.Marshal(ectx)
-			if err != nil {
-				return err
-			}
 			data, err := solveAndRead(ectx, c, st, compile.GuardPath)
 			if err != nil {
 				return fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
@@ -157,18 +156,6 @@ func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe
 			findings := guardFindings(string(data))
 			if len(findings) == 0 {
 				return nil
-			}
-			msg := fmt.Sprintf("phase %q: group %q has no run but is not independent of the state before it. "+
-				"It is built on that state and will be rebuilt whenever the base image or an earlier phase changes.",
-				ph.Name, group)
-			detail := make([][]byte, 0, len(findings)+1)
-			for _, f := range findings {
-				detail = append(detail, []byte(f))
-			}
-			detail = append(detail, []byte("To make the group independent, copy to a path that is not affected, or accept the rebuild."))
-			if dgst, err := def.Head(); err == nil {
-				// A warning that cannot be delivered must not fail the build.
-				_ = c.Warn(ectx, dgst, msg, client.WarnOpts{Level: 1, Detail: detail})
 			}
 			reason := findings[0]
 			if len(findings) > 1 {
@@ -187,7 +174,7 @@ func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe
 }
 
 // guardFindings turns the guard's output (see compile/guard.sh) into
-// sentences.
+// short reasons.
 func guardFindings(out string) []string {
 	var res []string
 	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
@@ -196,12 +183,14 @@ func guardFindings(out string) []string {
 			continue
 		}
 		switch kind {
+		case "L":
+			res = append(res, fmt.Sprintf("/%s is a symbolic link there", rest))
 		case "T":
-			res = append(res, fmt.Sprintf("/%s is a symbolic link or of another type there", rest))
+			res = append(res, fmt.Sprintf("/%s is a file on one side and a directory on the other", rest))
 		case "M":
 			tok, p, _ := strings.Cut(rest, " ")
 			lower, upper, _ := strings.Cut(tok, ":")
-			res = append(res, fmt.Sprintf("/%s has mode.uid.gid %s there, the group would create it as %s", p, lower, upper))
+			res = append(res, fmt.Sprintf("/%s has mode.uid.gid %s there, not %s", p, lower, upper))
 		}
 	}
 	return res
