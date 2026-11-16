@@ -366,7 +366,7 @@ Tests come in three layers:
 ## Status and known limits
 
 - Everything in this README is covered by the end-to-end tests against
-  BuildKit v0.35.0, except `run --no-cache`, labels and `--chown`.
+  BuildKit v0.35.0, except args, `run --no-cache`, labels and `--chown`.
   Larger real systems have hardly been built yet.
 - The write set of a group is read from its layer, so only the files it
   wrote are hashed. For a group with `run` the trees before and after
