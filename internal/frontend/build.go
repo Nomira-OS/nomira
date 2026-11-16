@@ -57,7 +57,7 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	// phase are disjoint. A problem stops the build before anything is
 	// merged on top of it or exported.
 	b, err := compile.Compile(r, compile.Hooks{
-		Decide: func(ph recipe.Phase, group string, lower, upper llb.State) (bool, error) {
+		Decide: func(ph recipe.Phase, group string, lower, upper llb.State) (bool, string, error) {
 			return independent(ctx, c, r, ph, group, lower, upper)
 		},
 		PhaseDone: func(plan compile.PhasePlan) error {
@@ -131,14 +131,61 @@ func recipeReader(ctx context.Context, c client.Client, filename string) (recipe
 
 // independent runs the guard for a group without run. It reports whether
 // merging the group, built on an empty state, gives the same tree as
-// building it on lower.
-func independent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe.Phase, group string, lower, upper llb.State) (bool, error) {
+// building it on lower. If not, the group is built on lower, which is
+// always correct but ties its cache to lower. That is easy to miss, so it
+// is reported as a build warning that names every path in the way.
+func independent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe.Phase, group string, lower, upper llb.State) (bool, string, error) {
 	st := compile.GuardState(r.Settings.Toolbox, lower, upper, ph.Name, group)
+	def, err := st.Marshal(ctx)
+	if err != nil {
+		return false, "", err
+	}
 	data, err := solveAndRead(ctx, c, st, compile.GuardPath)
 	if err != nil {
-		return false, fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
+		return false, "", fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
 	}
-	return strings.TrimSpace(string(data)) == "", nil
+	findings := guardFindings(string(data))
+	if len(findings) == 0 {
+		return true, "", nil
+	}
+	msg := fmt.Sprintf("phase %q: group %q has no run but is not independent of the state before it. "+
+		"It is built on that state and will be rebuilt whenever the base image or an earlier phase changes.",
+		ph.Name, group)
+	detail := make([][]byte, 0, len(findings)+1)
+	for _, f := range findings {
+		detail = append(detail, []byte(f))
+	}
+	detail = append(detail, []byte("To make the group independent, copy to a path that is not affected, or accept the rebuild."))
+	if dgst, err := def.Head(); err == nil {
+		// A warning that cannot be delivered must not fail the build.
+		_ = c.Warn(ctx, dgst, msg, client.WarnOpts{Level: 1, Detail: detail})
+	}
+	reason := findings[0]
+	if len(findings) > 1 {
+		reason += fmt.Sprintf(" (and %d more)", len(findings)-1)
+	}
+	return false, reason, nil
+}
+
+// guardFindings turns the guard's output (see compile/guard.sh) into
+// sentences.
+func guardFindings(out string) []string {
+	var res []string
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		kind, rest, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		switch kind {
+		case "T":
+			res = append(res, fmt.Sprintf("/%s is a symbolic link or of another type there", rest))
+		case "M":
+			tok, p, _ := strings.Cut(rest, " ")
+			lower, upper, _ := strings.Cut(tok, ":")
+			res = append(res, fmt.Sprintf("/%s has mode.uid.gid %s there, the group would create it as %s", p, lower, upper))
+		}
+	}
+	return res
 }
 
 // checkExpects verifies that the paths the groups of a phase expect exist

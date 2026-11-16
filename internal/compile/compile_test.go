@@ -75,9 +75,9 @@ func TestCompileShapes(t *testing.T) {
 	asked := map[string]bool{}
 	done := 0
 	b, err := Compile(r, Hooks{
-		Decide: func(ph recipe.Phase, group string, lower, upper llb.State) (bool, error) {
+		Decide: func(ph recipe.Phase, group string, lower, upper llb.State) (bool, string, error) {
 			asked[ph.Name+"/"+group] = true
-			return true, nil
+			return true, "", nil
 		},
 		PhaseDone: func(PhasePlan) error { done++; return nil },
 	})
@@ -138,7 +138,9 @@ func TestDecideFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, err := Compile(r, Hooks{
-		Decide: func(recipe.Phase, string, llb.State, llb.State) (bool, error) { return false, nil },
+		Decide: func(recipe.Phase, string, llb.State, llb.State) (bool, string, error) {
+			return false, "/etc/x is a symbolic link", nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

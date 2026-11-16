@@ -218,7 +218,17 @@ to building on that state if
 - the group puts a file where a directory or a symbolic link is, or the
   other way round.
 
-The fallback is silent and always correct; it only costs the rebuild.
+The fallback is always correct; it only costs the rebuild. Because that
+cost is easy to miss, every build reports it as a warning that names the
+group and each path in the way, and the group's steps carry the note
+`depends on earlier state` in the progress output:
+
+```text
+phase "features": group "sudo" has no run but is not independent of the
+state before it. It is built on that state and will be rebuilt whenever
+the base image or an earlier phase changes.
+  /etc/sudoers.d has mode.uid.gid 750.0.0 there, the group would create it as 755.0.0
+```
 
 ## Splitting a recipe across files
 

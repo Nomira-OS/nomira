@@ -63,8 +63,9 @@ type Build struct {
 type Hooks struct {
 	// Decide is asked for every group without run whether it may be built
 	// on an empty state. lower is the phase input, upper the group built on
-	// an empty state. Without Decide the answer is yes.
-	Decide func(ph recipe.Phase, group string, lower, upper llb.State) (bool, error)
+	// an empty state. Without Decide the answer is yes. On a no, reason
+	// says why in a few words; it is shown next to the group's steps.
+	Decide func(ph recipe.Phase, group string, lower, upper llb.State) (ok bool, reason string, err error)
 	// PhaseDone is called with each finished plan before the next phase is
 	// compiled on top of it. An error stops the compilation, so a conflict
 	// is reported before anything builds on the merged result.
@@ -124,8 +125,13 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 					}
 					ok := true
 					if hooks.Decide != nil {
-						if ok, err = hooks.Decide(ph, g, cur, alone); err != nil {
+						var reason string
+						if ok, reason, err = hooks.Decide(ph, g, cur, alone); err != nil {
 							return nil, err
+						}
+						if !ok && reason != "" {
+							// Visible in the progress output of every build.
+							scope += ", depends on earlier state: " + reason
 						}
 					}
 					if ok {
