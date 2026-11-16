@@ -1,0 +1,5 @@
+# NetworkManager with the connections kept in the recipe.
+packages: [networkmanager]
+services: [NetworkManager.service]
+commands:
+  - copy --chmod=0600 files/nm/ /etc/NetworkManager/system-connections/

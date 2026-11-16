@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -37,12 +38,13 @@ type rawStage struct {
 }
 
 type rawPhase struct {
-	Name       string             `yaml:"name"`
-	Validation string             `yaml:"validation"`
-	Shared     []string           `yaml:"shared"`
-	Env        map[string]string  `yaml:"env"`
-	Include    string             `yaml:"include"`
-	Groups     map[string]cmdList `yaml:"groups"`
+	Name       string              `yaml:"name"`
+	Validation string              `yaml:"validation"`
+	Shared     []string            `yaml:"shared"`
+	Env        map[string]string   `yaml:"env"`
+	Include    string              `yaml:"include"`
+	Collect    string              `yaml:"collect"`
+	Groups     map[string]rawGroup `yaml:"groups"`
 }
 
 // Parse decodes, schema-validates and arg-expands a recipe. buildArgs are the
@@ -129,31 +131,22 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		r.Settings.Toolbox = DefaultToolbox
 	}
 
+	if _, ok := args[itemsVar]; ok {
+		return nil, errf("recipe: settings.args: %q is reserved for collector phases", itemsVar)
+	}
+
 	// Prepare stages.
 	for name, rs := range raw.Prepare {
-		if name == "context" {
-			return nil, errf("recipe: prepare stage name %q is reserved", name)
+		if name == "context" || strings.Contains(name, "/") {
+			return nil, errf("recipe: prepare stage name %q is not allowed", name)
 		}
-		if rs.From == "" {
-			return nil, errf("recipe: prepare.%s: from is required", name)
-		}
-		lines, err := ld.commands(entry, rs.Commands)
+		fs, err := ld.stage(entry, rs)
 		if err != nil {
 			return nil, errf("recipe: prepare.%s: %w", name, err)
 		}
-		if len(lines) == 0 {
-			return nil, errf("recipe: prepare.%s: commands must not be empty", name)
-		}
-		st := Stage{From: ExpandArgs(rs.From, args)}
-		for i, line := range lines {
-			cmd, err := ParseCommand(ExpandArgs(line, args))
-			if err != nil {
-				return nil, errf("recipe: prepare.%s: command %d: %w", name, i+1, err)
-			}
-			if cc, ok := cmd.(CopyCmd); ok && cc.From != "" {
-				return nil, errf("recipe: prepare.%s: copy --from inside prepare stages is not supported yet", name)
-			}
-			st.Commands = append(st.Commands, cmd)
+		st, err := buildStage(fs, args)
+		if err != nil {
+			return nil, errf("recipe: prepare.%s: %w", name, err)
 		}
 		r.Prepare[name] = st
 	}
@@ -167,6 +160,7 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		return nil, errf("recipe: phases must not be empty")
 	}
 	seenPhase := map[string]bool{}
+	collectors := map[string]bool{}
 	for pi, rp := range phases {
 		if rp.Name == "" {
 			return nil, errf("recipe: phases[%d]: name is required", pi)
@@ -175,44 +169,180 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			return nil, errf("recipe: duplicate phase name %q", rp.Name)
 		}
 		seenPhase[rp.Name] = true
-		if !validPolicy(rp.Validation) {
-			return nil, errf("recipe: phase %q: validation %q invalid (strict|allow-identical)", rp.Name, rp.Validation)
+		if rp.Collect != "" {
+			collectors[rp.Name] = true
 		}
-		if len(rp.Groups) == 0 {
-			return nil, errf("recipe: phase %q: groups must not be empty", rp.Name)
-		}
+	}
+	items := map[string]map[string]bool{} // collector -> set of items
+	for _, rp := range phases {
 		ph := Phase{
 			Name:       rp.Name,
 			Validation: rp.Validation,
 			Shared:     rp.Shared,
 			Env:        expandMap(rp.Env, args),
-			Groups:     map[string][]Command{},
+			Groups:     map[string]Group{},
 		}
 		if err := checkEnvNames(fmt.Sprintf("phase %q: env", rp.Name), ph.Env); err != nil {
 			return nil, err
 		}
-		for gname, lines := range rp.Groups {
-			if len(lines) == 0 {
-				return nil, errf("recipe: phase %q: group %q: commands must not be empty", rp.Name, gname)
+		if rp.Collect != "" {
+			if len(rp.Groups) > 0 || rp.Validation != "" || len(rp.Shared) > 0 {
+				return nil, errf("recipe: phase %q: collect cannot be combined with groups, validation or shared", rp.Name)
 			}
-			var cmds []Command
-			for i, line := range lines {
+			if ReservedGroupKey(rp.Name) {
+				return nil, errf("recipe: phase %q: a collector cannot use this name, it has a fixed meaning in groups", rp.Name)
+			}
+			if !strings.Contains(rp.Collect, itemsRef) {
+				return nil, errf("recipe: phase %q: collect must contain %s", rp.Name, itemsRef)
+			}
+			r.Phases = append(r.Phases, ph)
+			continue
+		}
+		if !validPolicy(rp.Validation) {
+			return nil, errf("recipe: phase %q: validation %q invalid (strict|allow-identical)", rp.Name, rp.Validation)
+		}
+		if len(rp.Groups) == 0 {
+			return nil, errf("recipe: phase %q: needs groups or collect", rp.Name)
+		}
+		for gname, fg := range rp.Groups {
+			where := fmt.Sprintf("recipe: phase %q: group %q", rp.Name, gname)
+			if len(fg.Lines) == 0 && len(fg.Contribute) == 0 {
+				return nil, errf("%s: needs commands or a contribution to a collector", where)
+			}
+			// Stages of the group. Their names are local to it.
+			local := map[string]string{}
+			for sname, fs := range fg.Prepare {
+				if sname == "context" || strings.Contains(sname, "/") {
+					return nil, errf("%s: prepare stage name %q is not allowed", where, sname)
+				}
+				st, err := buildStage(fs, args)
+				if err != nil {
+					return nil, errf("%s: prepare.%s: %w", where, sname, err)
+				}
+				qual := rp.Name + "/" + gname + "/" + sname
+				local[sname] = qual
+				r.Prepare[qual] = st
+			}
+			grp := Group{}
+			for i, line := range fg.Lines {
 				cmd, err := ParseCommand(ExpandArgs(line, args))
 				if err != nil {
-					return nil, errf("recipe: phase %q: group %q: command %d: %w", rp.Name, gname, i+1, err)
+					return nil, errf("%s: command %d: %w", where, i+1, err)
 				}
 				if cc, ok := cmd.(CopyCmd); ok && cc.From != "" {
-					if _, exists := r.Prepare[cc.From]; !exists {
-						return nil, errf("recipe: phase %q: group %q: copy --from=%s references an unknown prepare stage", rp.Name, gname, cc.From)
+					if qual, isLocal := local[cc.From]; isLocal {
+						cc.From = qual
+						cmd = cc
+					} else if _, exists := raw.Prepare[cc.From]; !exists {
+						return nil, errf("%s: copy --from=%s references an unknown prepare stage", where, cc.From)
 					}
 				}
-				cmds = append(cmds, cmd)
+				grp.Commands = append(grp.Commands, cmd)
 			}
-			ph.Groups[gname] = cmds
+			for _, e := range fg.Expects {
+				if !strings.HasPrefix(e, "/") || path.Clean(e) != strings.TrimSuffix(e, "/") && e != "/" {
+					return nil, errf("%s: expects: %q is not a clean absolute path", where, e)
+				}
+				grp.Expects = append(grp.Expects, path.Clean(e))
+			}
+			for cname, list := range fg.Contribute {
+				if !collectors[cname] {
+					return nil, errf("%s: unknown key %q: no collector phase of that name (collectors: %s)", where, cname, strings.Join(sortedKeys(collectors), ", "))
+				}
+				for _, it := range list {
+					it = ExpandArgs(it, args)
+					if !validItem(it) {
+						return nil, errf("%s: %s: %q is not a valid item (letters, digits and @%%+=:,./_- only, not starting with -)", where, cname, it)
+					}
+					if items[cname] == nil {
+						items[cname] = map[string]bool{}
+					}
+					items[cname][it] = true
+				}
+				if grp.Contribute == nil {
+					grp.Contribute = map[string][]string{}
+				}
+				grp.Contribute[cname] = list
+			}
+			ph.Groups[gname] = grp
 		}
 		r.Phases = append(r.Phases, ph)
 	}
+
+	// Collectors: fill in what the groups contributed. The items are sorted
+	// and unique so that the command, and with it the cache key, does not
+	// depend on the order of groups or files.
+	for i, rp := range phases {
+		if rp.Collect == "" {
+			continue
+		}
+		list := sortedKeys(items[rp.Name])
+		line := strings.ReplaceAll(rp.Collect, itemsRef, strings.Join(list, " "))
+		cmd, err := ParseCommand(ExpandArgs(line, args))
+		if err != nil {
+			return nil, errf("recipe: phase %q: collect: %w", rp.Name, err)
+		}
+		run, ok := cmd.(RunCmd)
+		if !ok {
+			return nil, errf("recipe: phase %q: collect must be a run command", rp.Name)
+		}
+		r.Phases[i].Collect = &run
+		r.Phases[i].Items = list
+	}
 	return r, nil
+}
+
+const (
+	itemsVar = "items"
+	itemsRef = "${items}"
+)
+
+// buildStage parses the commands of a prepare stage.
+func buildStage(fs flatStage, args map[string]string) (Stage, error) {
+	if fs.From == "" {
+		return Stage{}, errf("from is required")
+	}
+	if len(fs.Lines) == 0 {
+		return Stage{}, errf("commands must not be empty")
+	}
+	st := Stage{From: ExpandArgs(fs.From, args)}
+	for i, line := range fs.Lines {
+		cmd, err := ParseCommand(ExpandArgs(line, args))
+		if err != nil {
+			return Stage{}, errf("command %d: %w", i+1, err)
+		}
+		if cc, ok := cmd.(CopyCmd); ok && cc.From != "" {
+			return Stage{}, errf("copy --from inside prepare stages is not supported yet")
+		}
+		st.Commands = append(st.Commands, cmd)
+	}
+	return st, nil
+}
+
+// validItem reports whether s can be placed into a collector command as a
+// single shell word without quoting.
+func validItem(s string) bool {
+	if s == "" || s[0] == '-' {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("@%+=:,./_-", c):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Graph renders the pipeline as a Mermaid flowchart (for `nomira graph` /
@@ -221,37 +351,79 @@ func (r *Recipe) Graph() string {
 	var b strings.Builder
 	b.WriteString("flowchart TD\n")
 	b.WriteString(fmt.Sprintf("    base[\"base: %s\"]\n", r.Settings.Base))
-	for name, st := range r.Prepare {
-		b.WriteString(fmt.Sprintf("    prep_%s[\"prepare %s (from %s)\"]\n", name, name, st.From))
+	stages := make([]string, 0, len(r.Prepare))
+	for name := range r.Prepare {
+		stages = append(stages, name)
+	}
+	sort.Strings(stages)
+	for _, name := range stages {
+		b.WriteString(fmt.Sprintf("    prep_%s[\"prepare %s (from %s)\"]\n", graphID(name), name, r.Prepare[name].From))
 	}
 	prev := "base"
 	for _, ph := range r.Phases {
-		merge := "merge_" + ph.Name
-		names := ph.GroupNames()
-		if len(names) == 1 {
-			id := fmt.Sprintf("g_%s_%s", ph.Name, names[0])
-			b.WriteString(fmt.Sprintf("    %s[\"%s / %s\"]\n    %s --> %s\n", id, ph.Name, names[0], prev, id))
+		if ph.IsCollector() {
+			id := "c_" + graphID(ph.Name)
+			b.WriteString(fmt.Sprintf("    %s[/\"collect %s (%d items)\"/]\n    %s --> %s\n", id, ph.Name, len(ph.Items), prev, id))
 			prev = id
 			continue
 		}
+		names := ph.BuildGroupNames()
+		merge := "merge_" + graphID(ph.Name)
 		for _, g := range names {
-			id := fmt.Sprintf("g_%s_%s", ph.Name, g)
-			b.WriteString(fmt.Sprintf("    %s[\"%s / %s\"]\n    %s --> %s\n", id, ph.Name, g, prev, id))
-			b.WriteString(fmt.Sprintf("    %s --> %s{{\"merge + validate (%s)\"}}\n", id, merge, ph.Policy(r.Settings.Validation)))
+			id := fmt.Sprintf("g_%s_%s", graphID(ph.Name), graphID(g))
+			label := fmt.Sprintf("%s / %s", ph.Name, g)
+			if !ph.Groups[g].HasRun() {
+				// No run: the group does not see the state before it.
+				b.WriteString(fmt.Sprintf("    %s([\"%s\"])\n", id, label))
+			} else {
+				b.WriteString(fmt.Sprintf("    %s[\"%s\"]\n    %s --> %s\n", id, label, prev, id))
+			}
+			b.WriteString(fmt.Sprintf("    %s --> %s\n", id, merge))
 		}
+		if len(names) == 0 {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("    %s{{\"merge %s (%s)\"}}\n    %s --> %s\n", merge, ph.Name, ph.Policy(r.Settings.Validation), prev, merge))
 		prev = merge
 	}
-	// --from edges
+	// Edges that do not follow the order of the phases.
 	for _, ph := range r.Phases {
-		for g, cmds := range ph.Groups {
-			for _, c := range cmds {
+		for _, g := range ph.GroupNames() {
+			grp := ph.Groups[g]
+			id := fmt.Sprintf("g_%s_%s", graphID(ph.Name), graphID(g))
+			for _, c := range grp.Commands {
 				if cc, ok := c.(CopyCmd); ok && cc.From != "" {
-					b.WriteString(fmt.Sprintf("    prep_%s -. copy .-> g_%s_%s\n", cc.From, ph.Name, g))
+					b.WriteString(fmt.Sprintf("    prep_%s -. copy .-> %s\n", graphID(cc.From), id))
 				}
+			}
+			if len(grp.Commands) == 0 {
+				b.WriteString(fmt.Sprintf("    %s([\"%s / %s\"])\n", id, ph.Name, g))
+			}
+			for _, cname := range sortedContrib(grp.Contribute) {
+				b.WriteString(fmt.Sprintf("    %s -. \"%s\" .-> c_%s\n", id, strings.Join(grp.Contribute[cname], " "), graphID(cname)))
 			}
 		}
 	}
 	return b.String()
+}
+
+// graphID turns a name into a Mermaid node id.
+func graphID(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '_'
+	}, s)
+}
+
+func sortedContrib(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func expandMap(m map[string]string, args map[string]string) map[string]string {

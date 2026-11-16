@@ -25,7 +25,9 @@ Sibling repositories in the Nomira-OS organization:
 
 - `internal/recipe`: schema, parser, `include` resolution. No BuildKit imports.
 - `internal/conflict`: disjointness check. Pure, no BuildKit imports.
-- `internal/compile`: recipe to LLB; `lister.sh` collects a group's write set.
+- `internal/compile`: recipe to LLB; `lister.sh` collects a group's write set,
+  `guard.sh` decides whether a group without `run` may be built apart from
+  the state before it.
 - `internal/frontend`: gateway entrypoint, image config.
 - `cmd/frontend`: the binary; also the `lint`, `graph` and `inspect` modes
   that the CLI calls through the image.
@@ -38,6 +40,7 @@ gofmt -l .                                   # must print nothing
 go vet ./...
 go test ./...
 sh hack/test_lister.sh                       # tests internal/compile/lister.sh
+sh hack/test_guard.sh                        # tests internal/compile/guard.sh
 go run ./cmd/frontend lint examples/recipe.yml
 ```
 
@@ -52,8 +55,15 @@ there, not here.
   keys are errors, also in included files.
 - **Error messages** speak in recipe terms (phase, group, path), never in
   LLB vertex ids.
-- **`lister.sh`** must run with busybox tools only and is covered by
-  `hack/test_lister.sh`. Extend the test when you change the script.
+- **`lister.sh` and `guard.sh`** must run with busybox tools only and are
+  covered by `hack/test_lister.sh` and `hack/test_guard.sh`. Extend the test
+  when you change a script.
+- **The guard must stay conservative.** A group without `run` is built on an
+  empty state only if merging provably gives the same tree as building on
+  the state before it. When in doubt the guard reports a finding and the
+  group falls back; never the other way round.
+- **The frontend knows no package manager or service manager.** Collectors
+  are generic: a command and a list of words.
 - **Build-time environment** is passed per `run`, never stored in the LLB
   state, so it cannot leak into other groups or the image config.
 - **Versions are pinned.** Never use `latest` or another moving tag for

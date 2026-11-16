@@ -9,7 +9,8 @@
 # sha256sum, readlink, cmp-free).
 set -eu
 L="${1:-/nomira/l}"; U="${2:-/nomira/u}"; O="${3:-/nomira/out}"; T="${4:-/nomira/tmp}"
-mkdir -p "$O" "$T"
+# A group built on an empty state has no lower tree mounted.
+mkdir -p "$O" "$T" "$L"
 ( cd "$U" && find . -mindepth 1 \( -type f -o -type l \) ) | sort > "$T/uf"
 ( cd "$L" && find . -mindepth 1 \( -type f -o -type l \) ) | sort > "$T/lf"
 ( cd "$U" && find . -mindepth 1 -type d ) | sort > "$T/ud"

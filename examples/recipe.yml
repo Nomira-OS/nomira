@@ -1,8 +1,12 @@
 # syntax=ghcr.io/nomira-os/nomira:1-alpha
 #
-# Example: a small system on the nomira base image. Groups within a phase
-# are declared independent, and the build verifies that their write sets
-# are disjoint.
+# Example: a small system on the nomira base image.
+#
+# Every feature is a group in a file of its own. A group names the packages
+# and services it needs; the collector phases install and enable them in
+# one step each. The groups themselves only copy files, so they do not see
+# the state before them: a new base image rebuilds the two collectors, not
+# the features.
 #
 # The package set comes from the base image: its mirrorlist points to the
 # Arch Linux Archive snapshot that belongs to the tag.
@@ -11,7 +15,6 @@ settings:
   name: mysystem
   description: Example system with kmscon, NetworkManager and AppArmor
   base: ghcr.io/nomira-os/nomira-image:2026.11.13
-  validation: strict
   labels:
     org.opencontainers.image.source: https://github.com/Nomira-OS/nomira
   env:
@@ -19,20 +22,14 @@ settings:
 
 phases:
   - name: packages
-    groups:
-      system:
-        - run --mount=type=cache,target=/usr/lib/sysimage/cache/pacman/pkg pacman -S --needed --noconfirm kmscon networkmanager
+    collect: run --mount=type=cache,target=/usr/lib/sysimage/cache/pacman/pkg pacman -S --needed --noconfirm ${items}
 
-  - name: configs
+  - name: features
     groups:
-      kmscon:
-        - copy --chmod=0644 files/kmscon/ /etc/kmscon/
-      networkmanager:
-        - copy --chmod=0600 files/nm/ /etc/NetworkManager/system-connections/
+      terminal: {include: features/terminal.yml}
+      network: {include: features/network.yml}
       boot:
         - copy files/kargs/ /usr/lib/bootc/kargs.d/
 
-  - name: finish
-    groups:
-      enable:
-        - run systemctl enable kmsconvt@tty1.service NetworkManager.service
+  - name: services
+    collect: run systemctl enable ${items}

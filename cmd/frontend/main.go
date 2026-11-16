@@ -107,9 +107,21 @@ func inspect() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	type group struct {
+		Name string `json:"name"`
+		// Run is false for a group that only copies: it does not depend on
+		// the base image or on earlier phases.
+		Run        bool                `json:"run"`
+		Expects    []string            `json:"expects,omitempty"`
+		Contribute map[string][]string `json:"contribute,omitempty"`
+	}
 	type phase struct {
 		Name   string   `json:"name"`
 		Groups []string `json:"groups"`
+		// Collector phases have items instead of groups.
+		Collect string   `json:"collect,omitempty"`
+		Items   []string `json:"items,omitempty"`
+		Detail  []group  `json:"detail,omitempty"`
 	}
 	out := struct {
 		Name        string   `json:"name"`
@@ -123,7 +135,15 @@ func inspect() int {
 		Platforms: r.Settings.Platforms, Tags: r.Settings.Tags,
 	}
 	for _, p := range r.Phases {
-		out.Phases = append(out.Phases, phase{Name: p.Name, Groups: p.GroupNames()})
+		ph := phase{Name: p.Name, Groups: p.GroupNames(), Items: p.Items}
+		if p.IsCollector() {
+			ph.Collect = p.Collect.Raw()
+		}
+		for _, g := range ph.Groups {
+			grp := p.Groups[g]
+			ph.Detail = append(ph.Detail, group{Name: g, Run: grp.HasRun(), Expects: grp.Expects, Contribute: grp.Contribute})
+		}
+		out.Phases = append(out.Phases, ph)
 	}
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")

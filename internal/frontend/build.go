@@ -51,20 +51,27 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
 
-	b, err := compile.Compile(r)
+	// The graph is assembled phase by phase, looking at real results on the
+	// way: whether a group without run may be built apart from the state
+	// before it, whether expected paths exist, and whether the groups of a
+	// phase are disjoint. A problem stops the build before anything is
+	// merged on top of it or exported.
+	b, err := compile.Compile(r, compile.Hooks{
+		Decide: func(ph recipe.Phase, group string, lower, upper llb.State) (bool, error) {
+			return independent(ctx, c, r, ph, group, lower, upper)
+		},
+		PhaseDone: func(plan compile.PhasePlan) error {
+			if err := checkExpects(ctx, c, plan); err != nil {
+				return err
+			}
+			if !plan.Validate {
+				return nil
+			}
+			return validatePhase(ctx, c, r, plan)
+		},
+	})
 	if err != nil {
 		return nil, err
-	}
-
-	// Validate every multi-group phase before solving the final state:
-	// conflicts must fail the build before anything is merged or exported.
-	for _, plan := range b.Phases {
-		if !plan.Validate {
-			continue
-		}
-		if err := validatePhase(ctx, c, r, plan); err != nil {
-			return nil, err
-		}
 	}
 
 	// Solve the final state.
@@ -122,6 +129,66 @@ func recipeReader(ctx context.Context, c client.Client, filename string) (recipe
 	}, nil
 }
 
+// independent runs the guard for a group without run. It reports whether
+// merging the group, built on an empty state, gives the same tree as
+// building it on lower.
+func independent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe.Phase, group string, lower, upper llb.State) (bool, error) {
+	st := compile.GuardState(r.Settings.Toolbox, lower, upper, ph.Name, group)
+	data, err := solveAndRead(ctx, c, st, compile.GuardPath)
+	if err != nil {
+		return false, fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
+	}
+	return strings.TrimSpace(string(data)) == "", nil
+}
+
+// checkExpects verifies that the paths the groups of a phase expect exist
+// in the state the phase starts from.
+func checkExpects(ctx context.Context, c client.Client, plan compile.PhasePlan) error {
+	var ref client.Reference
+	var missing []string
+	for _, g := range plan.Phase.GroupNames() {
+		for _, p := range plan.Phase.Groups[g].Expects {
+			if ref == nil {
+				def, err := plan.Input.Marshal(ctx)
+				if err != nil {
+					return err
+				}
+				res, err := c.Solve(ctx, client.SolveRequest{Definition: def.ToPB()})
+				if err != nil {
+					return err
+				}
+				if ref, err = res.SingleRef(); err != nil {
+					return err
+				}
+			}
+			if _, err := ref.StatFile(ctx, client.StatRequest{Path: p}); err != nil {
+				missing = append(missing, fmt.Sprintf("  group %q: %s", g, p))
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("phase %q: expected paths do not exist in the state the phase starts from:\n%s",
+		plan.Phase.Name, strings.Join(missing, "\n"))
+}
+
+func solveAndRead(ctx context.Context, c client.Client, st llb.State, filename string) ([]byte, error) {
+	def, err := st.Marshal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, err := c.Solve(ctx, client.SolveRequest{Definition: def.ToPB(), Evaluate: true})
+	if err != nil {
+		return nil, err
+	}
+	ref, err := res.SingleRef()
+	if err != nil {
+		return nil, err
+	}
+	return ref.ReadFile(ctx, client.ReadRequest{Filename: filename})
+}
+
 // validatePhase collects each group's write set (in parallel) and checks
 // pairwise disjointness under the phase's policy.
 func validatePhase(ctx context.Context, c client.Client, r *recipe.Recipe, plan compile.PhasePlan) error {
@@ -134,25 +201,17 @@ func validatePhase(ctx context.Context, c client.Client, r *recipe.Recipe, plan 
 	eg, ectx := errgroup.WithContext(ctx)
 	results := make(chan result, len(plan.Uppers))
 
-	for _, g := range plan.Phase.GroupNames() {
+	for _, g := range plan.Phase.BuildGroupNames() {
 		g := g
 		eg.Go(func() error {
-			st := compile.WriteSetState(r.Settings.Toolbox, plan.Input, plan.Uppers[g], plan.Phase.Name, g)
-			def, err := st.Marshal(ectx)
-			if err != nil {
-				return err
+			lower := &plan.Input
+			if plan.Isolated[g] {
+				lower = nil
 			}
-			res, err := c.Solve(ectx, client.SolveRequest{Definition: def.ToPB(), Evaluate: true})
+			st := compile.WriteSetState(r.Settings.Toolbox, lower, plan.Uppers[g], plan.Phase.Name, g)
+			data, err := solveAndRead(ectx, c, st, compile.WritesPath)
 			if err != nil {
 				return fmt.Errorf("phase %q group %q: collect write set: %w", plan.Phase.Name, g, err)
-			}
-			ref, err := res.SingleRef()
-			if err != nil {
-				return err
-			}
-			data, err := ref.ReadFile(ectx, client.ReadRequest{Filename: compile.WritesPath})
-			if err != nil {
-				return fmt.Errorf("phase %q group %q: read write set: %w", plan.Phase.Name, g, err)
 			}
 			entries, err := conflict.ParseWriteSet(string(data))
 			if err != nil {

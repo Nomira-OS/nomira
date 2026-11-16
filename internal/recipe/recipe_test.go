@@ -50,18 +50,18 @@ func TestParseSample(t *testing.T) {
 	if len(r.Phases) != 2 || len(r.Phases[1].Groups) != 3 {
 		t.Fatalf("unexpected structure: %+v", r.Phases)
 	}
-	run := r.Phases[0].Groups["system"][0].(RunCmd)
+	run := r.Phases[0].Groups["system"].Commands[0].(RunCmd)
 	if len(run.Mounts) != 1 || run.Mounts[0].Target != "/var/cache/pacman/pkg" {
 		t.Errorf("cache mount not parsed: %+v", run.Mounts)
 	}
 	if !strings.HasPrefix(run.Script, "pacman -Syu") {
 		t.Errorf("script mangled: %q", run.Script)
 	}
-	cp := r.Phases[1].Groups["kmscon"][0].(CopyCmd)
+	cp := r.Phases[1].Groups["kmscon"].Commands[0].(CopyCmd)
 	if cp.Chmod == nil || *cp.Chmod != 0o644 {
 		t.Errorf("chmod not parsed: %+v", cp.Chmod)
 	}
-	boot := r.Phases[1].Groups["boot"][0].(RunCmd)
+	boot := r.Phases[1].Groups["boot"].Commands[0].(RunCmd)
 	if !strings.Contains(boot.Script, "--snapshot 2026/11/10") {
 		t.Errorf("arg expansion failed: %q", boot.Script)
 	}
@@ -72,7 +72,7 @@ func TestBuildArgOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	boot := r.Phases[1].Groups["boot"][0].(RunCmd)
+	boot := r.Phases[1].Groups["boot"].Commands[0].(RunCmd)
 	if !strings.Contains(boot.Script, "2026/12/01") {
 		t.Errorf("override failed: %q", boot.Script)
 	}
@@ -148,7 +148,7 @@ phases:
 	if strings.Join(names, ",") != "base,extra,configs" {
 		t.Fatalf("phase order: %v", names)
 	}
-	if len(r.Phases[2].Groups["kmscon"]) != 1 || len(r.Prepare["aur"].Commands) != 1 {
+	if len(r.Phases[2].Groups["kmscon"].Commands) != 1 || len(r.Prepare["aur"].Commands) != 1 {
 		t.Fatalf("includes not resolved: %+v", r)
 	}
 }
@@ -208,7 +208,7 @@ phases:
 	if r.Phases[0].Env["MAKEFLAGS"] != "-j4" {
 		t.Errorf("phase env: %v", r.Phases[0].Env)
 	}
-	cmds := r.Phases[0].Groups["g"]
+	cmds := r.Phases[0].Groups["g"].Commands
 	if e := cmds[0].(EnvCmd); e.Name != "GREETING" || e.Value != "hello world" {
 		t.Errorf("env cmd: %+v", e)
 	}
@@ -222,6 +222,110 @@ phases:
 		"platform":  "settings: {base: x, platforms: [amd64]}\nphases: [{name: a, groups: {g: ['run true']}}]",
 		"tag":       "settings: {base: x, tags: ['a:b']}\nphases: [{name: a, groups: {g: ['run true']}}]",
 		"phase env": "settings: {base: x}\nphases: [{name: a, env: {'a-b': c}, groups: {g: ['run true']}}]",
+	}
+	for name, s := range bad {
+		if _, err := Parse([]byte(s), nil); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
+func TestCollectorsAndLongGroups(t *testing.T) {
+	files := map[string]string{
+		"recipe.yml": `
+settings: {base: x}
+prepare:
+  shared:
+    from: y
+    commands: ['run true']
+phases:
+  - name: packages
+    collect: run --mount=type=cache,target=/c pacman -S --needed --noconfirm ${items}
+  - name: features
+    groups:
+      terminal: {include: features/terminal.yml}
+      editor:
+        packages: [vim, kmscon]
+      network:
+        - copy files/nm/ /etc/NetworkManager/
+  - name: services
+    collect: run systemctl enable ${items}
+  - name: unused
+    collect: run echo ${items}
+`,
+		"features/terminal.yml": `
+packages: [kmscon]
+services: [kmsconvt@tty1.service]
+expects: [/usr/lib/systemd/system/kmsconvt@.service]
+prepare:
+  theme:
+    from: z
+    commands: {include: theme.yml}
+commands:
+  - copy files/kmscon/ /etc/kmscon/
+  - copy --from=theme /out/theme.conf /etc/kmscon/theme.conf
+  - copy --from=shared /x /y
+`,
+		"features/theme.yml": "- run ./gen-theme.sh\n",
+	}
+	r, err := ParseFile("recipe.yml", mapReader(files), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk := r.Phases[0]
+	if !pk.IsCollector() || strings.Join(pk.Items, ",") != "kmscon,vim" {
+		t.Fatalf("packages collector: %+v", pk)
+	}
+	if pk.Collect.Script != "pacman -S --needed --noconfirm kmscon vim" || len(pk.Collect.Mounts) != 1 {
+		t.Errorf("collect command: %+v", pk.Collect)
+	}
+	if got := r.Phases[2].Collect.Script; got != "systemctl enable kmsconvt@tty1.service" {
+		t.Errorf("services: %q", got)
+	}
+	if len(r.Phases[3].Items) != 0 {
+		t.Errorf("collector without contributions has items: %v", r.Phases[3].Items)
+	}
+	feat := r.Phases[1]
+	term := feat.Groups["terminal"]
+	if term.HasRun() || len(term.Commands) != 3 || term.Expects[0] != "/usr/lib/systemd/system/kmsconvt@.service" {
+		t.Errorf("terminal: %+v", term)
+	}
+	// The local stage is namespaced, the global one is not.
+	if from := term.Commands[1].(CopyCmd).From; from != "features/terminal/theme" {
+		t.Errorf("local stage reference: %q", from)
+	}
+	if from := term.Commands[2].(CopyCmd).From; from != "shared" {
+		t.Errorf("global stage reference: %q", from)
+	}
+	if st, ok := r.Prepare["features/terminal/theme"]; !ok || len(st.Commands) != 1 {
+		t.Errorf("local stage missing: %+v", r.Prepare)
+	}
+	// A group that only contributes builds nothing.
+	if strings.Join(feat.BuildGroupNames(), ",") != "network,terminal" || len(feat.GroupNames()) != 3 {
+		t.Errorf("build groups: %v", feat.BuildGroupNames())
+	}
+	if g := r.Graph(); !strings.Contains(g, "collect packages (2 items)") || !strings.Contains(g, "prep_features_terminal_theme") {
+		t.Errorf("graph:\n%s", g)
+	}
+}
+
+func TestCollectorErrors(t *testing.T) {
+	head := "settings: {base: x}\nphases:\n"
+	bad := map[string]string{
+		"no placeholder":       head + "  - {name: p, collect: run pacman -S}\n",
+		"not a run":            head + "  - {name: p, collect: 'copy ${items} /x'}\n  - {name: f, groups: {g: {p: [a]}}}\n",
+		"collect with groups":  head + "  - {name: p, collect: 'run x ${items}', groups: {g: ['run true']}}\n",
+		"reserved name":        head + "  - {name: commands, collect: 'run x ${items}'}\n",
+		"unknown contribution": head + "  - {name: f, groups: {g: {pakages: [a]}}}\n",
+		"item with space":      head + "  - {name: p, collect: 'run x ${items}'}\n  - {name: f, groups: {g: {p: ['a b']}}}\n",
+		"item with shell":      head + "  - {name: p, collect: 'run x ${items}'}\n  - {name: f, groups: {g: {p: ['a;rm']}}}\n",
+		"item is an option":    head + "  - {name: p, collect: 'run x ${items}'}\n  - {name: f, groups: {g: {p: ['--now']}}}\n",
+		"empty group":          head + "  - {name: f, groups: {g: {expects: [/a]}}}\n",
+		"relative expects":     head + "  - {name: f, groups: {g: {expects: [a/b], commands: ['run true']}}}\n",
+		"include plus keys":    head + "  - {name: f, groups: {g: {include: a.yml, expects: [/a]}}}\n",
+		"unknown local stage":  head + "  - {name: f, groups: {g: {commands: ['copy --from=nope /a /b']}}}\n",
+		"args named items":     "settings: {base: x, args: {items: a}}\nphases:\n  - {name: f, groups: {g: ['run true']}}\n",
+		"neither":              head + "  - {name: f}\n",
 	}
 	for name, s := range bad {
 		if _, err := Parse([]byte(s), nil); err == nil {

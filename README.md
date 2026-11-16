@@ -22,23 +22,28 @@ through multi-stage detours, and nothing checks whether they really are
 independent.
 
 - **Phases** run one after another, in the declared order.
-- **Groups** within a phase are declared independent: they fan out from
-  the same base state, are built in parallel, cached one by one (DiffOp)
-  and merged at the end of the phase (MergeOp).
+- **Groups** within a phase are declared independent: they are built in
+  parallel, cached one by one and merged at the end of the phase
+  (MergeOp).
 - The independence is **verified during the build** (the write sets must
   be disjoint, with prefix semantics for whiteouts). A conflict aborts
-  the build before anything is merged or exported.
+  the build before anything is merged on top of it or exported.
+- A group **without `run`** never sees the state before it. It is built
+  apart from that state, so neither a new base image nor a change in an
+  earlier phase rebuilds it.
+- **Collectors** gather what must happen in one step, such as installing
+  packages: groups name what they need, one command does it.
 
 ```
-S ──Exec(g₁)──→ R₁ ──Diff──→ Δ₁  ┐
-S ──Exec(g₂)──→ R₂ ──Diff──→ Δ₂  ├─ parallel, cached one by one, validated
-S ──Exec(gₙ)──→ Rₙ ──Diff──→ Δₙ  ┘
+S ──run(g₁)──→ R₁ ──Diff──→ Δ₁  ┐
+S ──run(g₂)──→ R₂ ──Diff──→ Δ₂  ├─ parallel, cached one by one, validated
+    copy(g₃) ─────────────→ Δ₃  ┘  (no run: does not depend on S)
 S' = Merge(S, Δ₁ … Δₙ)
 ```
 
 When a group changes, only that group is rebuilt; its neighbours come
-from the cache. Motivation and model in detail: `docs/concept.md`
-(concept v1; for the recipe schema this README is authoritative).
+from the cache. `docs/concept.md` is the first draft of the model and is
+kept as a record; this README is authoritative.
 
 ## Short example
 
@@ -63,7 +68,7 @@ phase "content": declared-independent groups are not disjoint (policy: strict):
 
 ## Recipe
 
-The full schema in one example, here with an Arch image as the base:
+A recipe that uses everything, here with an Arch image as the base:
 
 ```yaml
 # syntax=ghcr.io/nomira-os/nomira:1-alpha
@@ -88,20 +93,32 @@ prepare:                                    # optional named stages (multi-stage
       - run --no-cache git clone https://aur.archlinux.org/example.git /src
 
 phases:                                     # list: order matters
-  - name: packages
-    groups:                                 # mapping: groups are independent, key = name
-      system:                               # a single group = the serial case, no validation
-        - run --mount=type=cache,target=/usr/lib/sysimage/cache/pacman/pkg pacman -S --needed --noconfirm kmscon
-  - name: configs
+  - name: packages                          # a collector, see below
+    collect: run --mount=type=cache,target=/usr/lib/sysimage/cache/pacman/pkg pacman -S --needed --noconfirm ${items}
+
+  - name: features
     validation: allow-identical             # a phase overrides the default
     shared: [/usr/lib/tmpfiles.d/]          # allowlist (suffix "/" = prefix)
     env: {MAKEFLAGS: -j4}                   # environment for this phase
-    groups:
-      kmscon:
-        - env THEME=dark                    # applies to the following commands of the group
-        - copy --chmod=0644 files/kmscon/ /etc/kmscon/
+    groups:                                 # mapping: groups are independent, key = name
+      network:                              # short form: a list of commands
+        - copy files/nm/ /etc/NetworkManager/
+      terminal:                             # long form
+        packages: [kmscon]                  # contribution to the phase "packages"
+        services: [kmsconvt@tty1.service]   # contribution to the phase "services"
+        expects: [/usr/lib/systemd/system/kmsconvt@.service]
+        prepare:                            # stages that only this group uses
+          theme:
+            from: docker.io/library/alpine:3.22
+            commands: [run mkdir /out && echo dark > /out/theme.conf]
+        commands:
+          - copy --chmod=0644 files/kmscon/ /etc/kmscon/
+          - copy --from=theme /out/theme.conf /etc/kmscon/theme.conf
       aur:
         - copy --from=aurbuild /out/ /usr/lib/aur/
+
+  - name: services
+    collect: run systemctl enable ${items}
 ```
 
 Commands are strings that start with a verb (use a YAML block scalar for
@@ -124,39 +141,121 @@ end up in the image configuration.
 
 **`run --no-cache`:** The step always runs, even if BuildKit has it in its
 cache. Everything that builds on it then runs again: the rest of its group
-and all following phases. Such steps therefore belong in a group of their
-own as late as possible, or in a `prepare` stage.
+and all following phases. Such steps therefore belong in a `prepare`
+stage, or in a group of their own as late as possible.
 
 **`platforms` and `tags`:** The frontend checks both and reports them
 through `inspect`, but does not act on them. Which architecture is built
 and which tags are published is up to the caller (CLI or CI).
 
-## Splitting a recipe across files
+## Groups
 
-A recipe has one entry file; everything else can be moved out with
-`include`. Paths are relative to the including file and must stay inside
-the recipe directory. Included files may include further files; cycles are
-an error.
+A group is written in one of two forms. The short form is a list of
+commands. The long form is a mapping; four keys have a fixed meaning:
+
+| Key | Meaning |
+|---|---|
+| `commands` | The list of commands |
+| `prepare` | Stages that belong to this group. Their names are local to it and win over stages of the same name at the top |
+| `expects` | Paths that must exist in the state the phase starts from |
+| `include` | Read the group from a file; no other key next to it |
+
+Every other key is a **contribution** to the collector phase of that
+name. A group may consist of contributions alone.
+
+**`expects`** is checked on every build, without rebuilding the group.
+It is for groups that override or extend something: if a new base image
+no longer has the unit a drop-in refers to, the build says so instead of
+silently shipping a drop-in for nothing.
+
+## Collectors
+
+Some things must happen in one step. Two groups that both install a
+package both write the package database, so they can never be
+independent. A collector solves this: a phase with `collect` instead of
+`groups` runs one command, and `${items}` in it is replaced by what all
+groups of the recipe contributed under the name of the phase.
 
 ```yaml
-prepare:
-  aurbuild:
-    from: docker.io/library/archlinux:base-devel
-    commands: {include: stages/aur.yml}     # file with a list of commands
-
-phases:
-  - include: phases/base.yml                # file with one phase or a list of phases
-  - name: configs
-    groups:
-      kmscon: {include: groups/kmscon.yml}  # file with a list of commands
-      networkmanager:
-        - copy configs/nm/ /etc/NetworkManager/
+- name: packages
+  collect: run pacman -S --needed --noconfirm ${items}
 ```
 
-Wherever a list of commands is expected, `include: <file>` works instead;
-in the list of phases, `- include: <file>` pulls in whole phases.
-`settings` exists only in the entry file. Source paths of `copy` still
-refer to the build context, not to the included file.
+- The frontend knows nothing about package managers or services. A
+  collector is whatever command you give it; a recipe on another
+  distribution uses `dnf install` in the same place.
+- Contributions come from groups of any phase, also later ones. Where the
+  collector stands in the list of phases decides when it runs.
+- Items are sorted and de-duplicated, so the command does not depend on
+  the order of groups or files. A collector without items is skipped.
+- An item is a single word of letters, digits and `@%+=:,./_-`, and does
+  not start with `-`. Anything else is an error before the build.
+
+A collector runs as one step: when one item changes, the whole command
+runs again. Use it where that is the nature of the operation, or where
+the command is quick.
+
+## What a rebuild costs
+
+A group that uses `run` is executed on the state before it. A new base
+image, or a change in an earlier phase, therefore runs it again.
+
+A group without `run` only copies files, from the recipe directory or
+from a `prepare` stage. The frontend builds it apart from the state
+before it and merges the result, the way `COPY --link` works in a
+Dockerfile. Its cache then depends only on what it copies.
+
+The goal for a recipe is therefore: **`run` in `prepare` stages and
+collectors, copies in groups.** A script that generates a file runs in a
+`prepare` stage with its own image; the group copies the result.
+
+Building apart is only done where it gives the same result. On every
+build a check compares the group with the state before it and falls back
+to building on that state if
+
+- a directory the group copies into is a symbolic link there, or exists
+  with another mode or owner, or
+- the group puts a file where a directory or a symbolic link is, or the
+  other way round.
+
+The fallback is silent and always correct; it only costs the rebuild.
+
+## Splitting a recipe across files
+
+A recipe has one entry file. `include: <file>` can stand in place of a
+phase, a group or a list of commands and is replaced by the content of
+the file. Paths are relative to the including file and must stay inside
+the recipe directory. Included files may include further files; cycles
+are an error.
+
+```yaml
+phases:
+  - include: phases/base.yml                # one phase or a list of phases
+  - name: features
+    groups:
+      terminal: {include: features/terminal.yml}   # a group, short or long form
+      aur:
+        prepare:
+          build:
+            from: docker.io/library/archlinux:base-devel
+            commands: {include: stages/aur.yml}     # a list of commands
+        commands:
+          - copy --from=build /out/ /usr/lib/aur/
+```
+
+A group file in the long form brings everything the feature needs:
+
+```yaml
+# features/terminal.yml
+packages: [kmscon]
+services: [kmsconvt@tty1.service]
+commands:
+  - copy --chmod=0644 files/kmscon/ /etc/kmscon/
+```
+
+`settings` exists only in the entry file. Source paths of `copy` always
+refer to the build context, not to the included file. `examples/` has a
+recipe laid out this way.
 
 ## Building a recipe
 
@@ -245,21 +344,26 @@ proxy: it generates a `go.offline.mod` that serves all dependencies via
 build then uses `GOFLAGS="-mod=mod -modfile=go.offline.mod"`. The normal
 `go.mod` is not affected.
 
-Tests: `go test ./...` (parser, conflict check) plus
-`hack/test_lister.sh`, which checks `internal/compile/lister.sh` against
-synthetic trees (add, change, metadata, symlink, file and directory
-deletion, paths with spaces).
+Tests: `go test ./...` (parser, conflict check, shape of the build
+graph) plus `hack/test_lister.sh` and `hack/test_guard.sh`, which run the
+two shell scripts the build uses against synthetic trees.
 
 ## Status and known limits
 
-- Collecting the write set hashes the whole upper tree of a group; phases
-  with a single group (the pacman phase, for instance) skip diff, merge
-  and validation entirely.
+- Tried in a real build: phases, groups, the conflict check and its
+  abort. Covered by tests but **not yet run in a real build**: includes,
+  `env`, `run --no-cache`, labels, collectors, the long form of groups,
+  `expects`, and building groups without `run` apart from the state
+  before them.
+- Collecting the write set hashes the whole upper tree of a group. A
+  phase with a single group that uses `run` skips diff, merge and
+  validation entirely.
 - `copy` does not support paths with spaces on the command line (the
   validation itself does); `--chown` is numeric only.
+- `copy --from` inside a `prepare` stage is not supported yet.
 - The lister does not yet record xattrs and hard links as writes of their
-  own (concept.md §10).
-- The lister needs a toolbox image with busybox tools
+  own.
+- The checks need a toolbox image with busybox tools
   (`settings.toolbox`, default `docker.io/library/busybox:1.36.1`).
 - The platform follows the build host; multi-arch is open.
 - Built against BuildKit v0.35.0; MergeOp and DiffOp need ≥ 0.10.

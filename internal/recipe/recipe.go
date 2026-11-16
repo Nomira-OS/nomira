@@ -1,33 +1,31 @@
 // Package recipe defines the nomira recipe schema and its parser.
 //
-// Shape (v2, "# syntax" era):
+// Shape:
 //
 //	# syntax=ghcr.io/nomira-os/nomira:1-alpha
 //	settings:
 //	  name: mysystem
 //	  base: ghcr.io/…/arch-bootc@sha256:…
-//	  validation: strict            # file default: strict | allow-identical
-//	  toolbox: docker.io/library/busybox:1.36.1
-//	  args:
-//	    SNAPSHOT: "2026/11/10"      # overridable via --build-arg / --opt build-arg:SNAPSHOT
 //	prepare:                        # optional named stages (multistage)
 //	  aurbuild:
 //	    from: docker.io/library/archlinux:base-devel
 //	    commands:
-//	      - run pacman -Syu --noconfirm git base-devel
-//	phases:                         # ordered; groups within a phase are independent
-//	  - name: base
+//	      - run git clone … /src
+//	phases:                         # ordered
+//	  - name: packages              # a collector: one command, fed by groups
+//	    collect: run pacman -S --needed --noconfirm ${items}
+//	  - name: features              # groups within a phase are independent
 //	    groups:
-//	      system:
-//	        - run --mount=type=cache,target=/var/cache/pacman/pkg pacman -Syu --needed --noconfirm foo
-//	  - name: configs
-//	    validation: allow-identical
-//	    shared: [/usr/lib/tmpfiles.d/common.conf]
-//	    groups:
-//	      kmscon:
-//	        - copy --chmod=0644 files/kmscon/ /etc/kmscon/
-//	      aur:
-//	        - copy --from=aurbuild /home/build/out/ /var/tmp/aur/
+//	      network:                  # short form: a list of commands
+//	        - copy files/nm/ /etc/NetworkManager/
+//	      terminal:                 # long form
+//	        packages: [kmscon]      # contribution to the phase "packages"
+//	        expects: [/usr/lib/systemd/system/kmsconvt@.service]
+//	        prepare:                # stages local to this group
+//	          theme: {from: …, commands: […]}
+//	        commands:
+//	          - copy --from=theme /out/theme.conf /etc/kmscon/theme.conf
+//	      editor: {include: features/editor.yml}
 //
 // Design principle: ordered things are YAML lists, independent things are
 // YAML mappings (key = name, order meaningless).
@@ -80,14 +78,48 @@ type Stage struct {
 	Commands []Command
 }
 
-// Phase is one serial pipeline step containing independent groups.
+// Group is one independent unit of a phase.
+type Group struct {
+	Commands []Command
+	// Expects lists paths that must exist in the state the phase starts
+	// from. They are checked on every build without invalidating the
+	// group's cache.
+	Expects []string
+	// Contribute maps a collector phase name to the items this group adds
+	// to it.
+	Contribute map[string][]string
+}
+
+// HasRun reports whether the group executes anything. A group without run
+// never sees the state before it, so its result cannot depend on that
+// state: the compiler builds it on an empty state when that is provably
+// equivalent (see compile.Hooks.Decide).
+func (g Group) HasRun() bool {
+	for _, c := range g.Commands {
+		if _, ok := c.(RunCmd); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Phase is one serial pipeline step. It either contains independent groups
+// or is a collector: a single command that runs once with the items all
+// groups of the recipe contributed under the phase's name.
 type Phase struct {
 	Name       string
 	Validation string            // empty = inherit file default
 	Shared     []string          // allowlist: exact paths, or prefixes when ending in "/"
 	Env        map[string]string // build-time environment for the phase's runs
-	Groups     map[string][]Command
+	Groups     map[string]Group
+
+	// Collector phases only.
+	Collect *RunCmd  // the command with ${items} filled in
+	Items   []string // sorted, unique contributions
 }
+
+// IsCollector reports whether the phase is a collector.
+func (p Phase) IsCollector() bool { return p.Collect != nil }
 
 // Policy returns the effective validation policy for the phase.
 func (p Phase) Policy(fileDefault string) string {
@@ -107,6 +139,18 @@ func (p Phase) GroupNames() []string {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+	return names
+}
+
+// BuildGroupNames returns the sorted names of the groups that have
+// commands. Groups that only contribute to collectors build nothing.
+func (p Phase) BuildGroupNames() []string {
+	var names []string
+	for _, n := range p.GroupNames() {
+		if len(p.Groups[n].Commands) > 0 {
+			names = append(names, n)
+		}
+	}
 	return names
 }
 

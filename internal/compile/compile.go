@@ -1,8 +1,17 @@
-// Package compile turns a parsed recipe into LLB states:
-// phases serial, groups fanned out on the phase's input state, diffed
-// (DiffOp) and merged back (MergeOp). Single-group phases skip diff/merge
-// and validation entirely — there is nothing to compare, and the big serial
-// phases (pacman) stay cheap that way.
+// Package compile turns a parsed recipe into LLB states.
+//
+// Phases are serial. The groups of a phase fan out and their results are
+// merged back (MergeOp). A group contributes one layer:
+//
+//   - a group with run is executed on the phase's input state S; its layer
+//     is DiffOp(S, result);
+//   - a group without run never sees S, so it is built on an empty state
+//     and its result is the layer. Its cache then depends on neither the
+//     base image nor earlier phases. This is only done when Hooks.Decide
+//     confirms that merging gives the same tree as building on S.
+//
+// A phase with a single group that runs on S skips diff and merge. A
+// collector phase is one run on S with the collected items.
 package compile
 
 import (
@@ -27,13 +36,12 @@ type PhasePlan struct {
 	Phase recipe.Phase
 	// Input is the state the phase starts from (S).
 	Input llb.State
-	// Uppers maps group name → state after running the group on Input (Rᵢ).
+	// Uppers maps group name → the group's result: S plus the group's
+	// changes, or for an isolated group only its own files.
 	Uppers map[string]llb.State
-	// Diffs maps group name → DiffOp(Input, Uppers[g]) (Δᵢ); nil-equivalent
-	// (absent) for single-group phases.
-	Diffs map[string]llb.State
-	// Output is the phase result: Merge(Input, Δ…) or, for a single group,
-	// that group's upper directly.
+	// Isolated marks the groups that were built on an empty state.
+	Isolated map[string]bool
+	// Output is the phase result.
 	Output llb.State
 	// Validate reports whether this phase needs write-set validation.
 	Validate bool
@@ -50,8 +58,21 @@ type Build struct {
 	Final llb.State
 }
 
+// Hooks let the caller look at real build results while the graph is
+// assembled. Both are optional.
+type Hooks struct {
+	// Decide is asked for every group without run whether it may be built
+	// on an empty state. lower is the phase input, upper the group built on
+	// an empty state. Without Decide the answer is yes.
+	Decide func(ph recipe.Phase, group string, lower, upper llb.State) (bool, error)
+	// PhaseDone is called with each finished plan before the next phase is
+	// compiled on top of it. An error stops the compilation, so a conflict
+	// is reported before anything builds on the merged result.
+	PhaseDone func(plan PhasePlan) error
+}
+
 // Compile builds the full LLB graph for a recipe.
-func Compile(r *recipe.Recipe) (*Build, error) {
+func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	b := &Build{Recipe: r, Stages: map[string]llb.State{}}
 
 	ctxSrc := llb.Local(LocalContext,
@@ -59,7 +80,8 @@ func Compile(r *recipe.Recipe) (*Build, error) {
 		llb.SharedKeyHint(LocalContext),
 	)
 
-	// Prepare stages.
+	// Prepare stages, global and group-local alike. BuildKit builds a stage
+	// when something copies from it; the order here does not matter.
 	for name, st := range r.Prepare {
 		state := baseState(st.From, fmt.Sprintf("prepare %s", name))
 		var err error
@@ -74,33 +96,75 @@ func Compile(r *recipe.Recipe) (*Build, error) {
 	cur := baseState(r.Settings.Base, "base")
 	for _, ph := range r.Phases {
 		plan := PhasePlan{
-			Phase:  ph,
-			Input:  cur,
-			Uppers: map[string]llb.State{},
-			Diffs:  map[string]llb.State{},
+			Phase:    ph,
+			Input:    cur,
+			Uppers:   map[string]llb.State{},
+			Isolated: map[string]bool{},
 		}
-		names := ph.GroupNames()
-		for _, g := range names {
-			upper, err := applyCommands(cur, ph.Groups[g], mergeEnv(r.Settings.Env, ph.Env), ctxSrc, b.Stages, fmt.Sprintf("%s/%s", ph.Name, g))
-			if err != nil {
+		env := mergeEnv(r.Settings.Env, ph.Env)
+
+		if ph.IsCollector() {
+			plan.Output = cur
+			if len(ph.Items) > 0 {
+				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, b.Stages, "collect "+ph.Name)
+				if err != nil {
+					return nil, err
+				}
+				plan.Output = out
+			}
+		} else {
+			names := ph.BuildGroupNames()
+			for _, g := range names {
+				scope := fmt.Sprintf("%s/%s", ph.Name, g)
+				grp := ph.Groups[g]
+				if !grp.HasRun() {
+					alone, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, b.Stages, scope)
+					if err != nil {
+						return nil, err
+					}
+					ok := true
+					if hooks.Decide != nil {
+						if ok, err = hooks.Decide(ph, g, cur, alone); err != nil {
+							return nil, err
+						}
+					}
+					if ok {
+						plan.Uppers[g] = alone
+						plan.Isolated[g] = true
+						continue
+					}
+				}
+				upper, err := applyCommands(cur, grp.Commands, mergeEnv(env), ctxSrc, b.Stages, scope)
+				if err != nil {
+					return nil, err
+				}
+				plan.Uppers[g] = upper
+			}
+			switch {
+			case len(names) == 0:
+				plan.Output = cur
+			case len(names) == 1 && !plan.Isolated[names[0]]:
+				// Serial case: no diff, no merge, no validation.
+				plan.Output = plan.Uppers[names[0]]
+			default:
+				plan.Validate = len(names) > 1
+				merge := []llb.State{cur}
+				for _, g := range names {
+					layer := plan.Uppers[g]
+					if !plan.Isolated[g] {
+						layer = llb.Diff(cur, layer,
+							llb.WithCustomNamef("[%s/%s] diff", ph.Name, g))
+					}
+					merge = append(merge, layer)
+				}
+				plan.Output = llb.Merge(merge,
+					llb.WithCustomNamef("[%s] merge %d groups", ph.Name, len(names)))
+			}
+		}
+		if hooks.PhaseDone != nil {
+			if err := hooks.PhaseDone(plan); err != nil {
 				return nil, err
 			}
-			plan.Uppers[g] = upper
-		}
-		if len(names) == 1 {
-			// Serial case: no diff, no merge, no validation.
-			plan.Output = plan.Uppers[names[0]]
-		} else {
-			plan.Validate = true
-			merge := []llb.State{cur}
-			for _, g := range names {
-				d := llb.Diff(cur, plan.Uppers[g],
-					llb.WithCustomNamef("[%s/%s] diff", ph.Name, g))
-				plan.Diffs[g] = d
-				merge = append(merge, d)
-			}
-			plan.Output = llb.Merge(merge,
-				llb.WithCustomNamef("[%s] merge %d groups", ph.Name, len(names)))
 		}
 		cur = plan.Output
 		b.Phases = append(b.Phases, plan)

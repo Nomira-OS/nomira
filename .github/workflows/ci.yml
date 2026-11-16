@@ -22,6 +22,7 @@ jobs:
       trivy: true
       extra: |
         sh hack/test_lister.sh
+        sh hack/test_guard.sh
         go run ./cmd/frontend lint examples/recipe.yml
 
   # Every commit on main is published as an immutable development build,

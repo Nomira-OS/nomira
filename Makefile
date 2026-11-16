@@ -11,6 +11,7 @@ test:
 	go vet $(GOFLAGS) ./...
 	go test $(GOFLAGS) ./...
 	sh hack/test_lister.sh
+	sh hack/test_guard.sh
 
 lint-example: build
 	$(BIN) lint examples/recipe.yml
