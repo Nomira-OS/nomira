@@ -33,7 +33,7 @@ jobs:
     timeout-minutes: 20
     env:
       # renovate: datasource=docker depName=moby/buildkit
-      BUILDKIT_VERSION: v0.35.0
+      BUILDKIT_VERSION: v0.35.1
       # renovate: datasource=docker depName=registry
       REGISTRY_VERSION: 3.0.0
     steps:
