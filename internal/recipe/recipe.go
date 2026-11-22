@@ -45,7 +45,7 @@ const (
 
 // DefaultToolbox is the image used for write-set collection execs.
 // renovate: datasource=docker
-const DefaultToolbox = "docker.io/library/busybox:1.36.1"
+const DefaultToolbox = "docker.io/library/busybox:1.38.0"
 
 // Recipe is the fully parsed and schema-validated build description.
 type Recipe struct {
