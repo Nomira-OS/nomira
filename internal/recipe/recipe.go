@@ -163,16 +163,18 @@ type Command interface {
 	Raw() string
 }
 
-// CacheMount is a `--mount=type=cache,...` flag on a run command.
-type CacheMount struct {
+// Mount is a `--mount=type=cache,...` or `--mount=type=tmpfs,...` flag on
+// a run command. Nothing written below a mount ends up in the layer.
+type Mount struct {
+	Type    string // cache | tmpfs
 	Target  string
-	ID      string // defaults to Target when empty
-	Sharing string // shared | private | locked (default shared)
+	ID      string // cache only; defaults to Target when empty
+	Sharing string // cache only: shared | private | locked (default shared)
 }
 
 // RunCmd executes a shell script via `/bin/sh -c`.
 type RunCmd struct {
-	Mounts  []CacheMount
+	Mounts  []Mount
 	NoCache bool // always execute, even if BuildKit has the step cached
 	Script  string
 	raw     string

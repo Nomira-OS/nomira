@@ -8,7 +8,7 @@ import (
 
 // ParseCommand parses one verb-first command string:
 //
-//	run [--no-cache] [--mount=type=cache,target=/path[,id=ID][,sharing=shared|private|locked]]... <shell script>
+//	run [--no-cache] [--mount=type=cache,target=/path[,id=ID][,sharing=shared|private|locked]]... [--mount=type=tmpfs,target=/path]... <shell script>
 //	env NAME=VALUE
 //	copy [--from=STAGE] [--chmod=0644] [--chown=UID:GID] <src>... <dst>
 //
@@ -46,7 +46,7 @@ func parseRun(raw, rest string) (Command, error) {
 		case flag == "--no-cache":
 			cmd.NoCache = true
 		case strings.HasPrefix(flag, "--mount="):
-			m, err := parseCacheMount(strings.TrimPrefix(flag, "--mount="))
+			m, err := parseMount(strings.TrimPrefix(flag, "--mount="))
 			if err != nil {
 				return nil, err
 			}
@@ -88,9 +88,8 @@ func validEnvName(s string) bool {
 	return true
 }
 
-func parseCacheMount(spec string) (CacheMount, error) {
-	m := CacheMount{Sharing: "shared"}
-	typeSeen := false
+func parseMount(spec string) (Mount, error) {
+	m := Mount{}
 	for _, kv := range strings.Split(spec, ",") {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
@@ -98,10 +97,10 @@ func parseCacheMount(spec string) (CacheMount, error) {
 		}
 		switch k {
 		case "type":
-			if v != "cache" {
-				return m, errf("run: --mount type %q not supported (only \"cache\")", v)
+			if v != "cache" && v != "tmpfs" {
+				return m, errf("run: --mount type %q not supported (\"cache\" or \"tmpfs\")", v)
 			}
-			typeSeen = true
+			m.Type = v
 		case "target", "dst", "destination":
 			m.Target = v
 		case "id":
@@ -115,14 +114,23 @@ func parseCacheMount(spec string) (CacheMount, error) {
 			return m, errf("run: unknown --mount option %q", k)
 		}
 	}
-	if !typeSeen {
-		return m, errf("run: --mount requires type=cache")
+	switch m.Type {
+	case "":
+		return m, errf("run: --mount requires type=cache or type=tmpfs")
+	case "tmpfs":
+		if m.ID != "" || m.Sharing != "" {
+			return m, errf("run: id= and sharing= apply to type=cache only")
+		}
+	case "cache":
+		if m.ID == "" {
+			m.ID = m.Target
+		}
+		if m.Sharing == "" {
+			m.Sharing = "shared"
+		}
 	}
 	if m.Target == "" || !strings.HasPrefix(m.Target, "/") {
 		return m, errf("run: --mount requires an absolute target= path")
-	}
-	if m.ID == "" {
-		m.ID = m.Target
 	}
 	return m, nil
 }

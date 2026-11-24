@@ -94,6 +94,30 @@ notcached() {
 
 # ---- cases -------------------------------------------------------------
 
+case_tmpfs_mount() {
+  recipe tmpfs_mount <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run --mount=type=tmpfs,target=/scratch echo x > /scratch/f && cp /scratch/f /etc/from-tmpfs"]
+EOF
+  must_build tmpfs_mount || return 0
+  has tmpfs_mount etc/from-tmpfs x
+  hasnot tmpfs_mount scratch/f
+}
+
+case_context_excludes_output() {
+  recipe context_excludes_output <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["copy .nomira/big /big"]
+EOF
+  mkdir -p "$work/context_excludes_output/.nomira"
+  echo big > "$work/context_excludes_output/.nomira/big"
+  must_fail context_excludes_output "big"
+}
+
 case_groups_merge() {
   recipe groups_merge <<'EOF'
 phases:
@@ -427,7 +451,8 @@ EOF
 all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_isolated
 delete_alone_is_fine allow_identical shared rewrite_counts_as_write serial_phases
 collectors long_form_and_includes expects independent_of_base fallback_symlink
-fallback_mode fallback_type isolated_single_group"
+fallback_mode fallback_type isolated_single_group tmpfs_mount
+context_excludes_output"
 
 for c in ${*:-$all}; do
   count=$((count + 1))

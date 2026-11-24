@@ -126,7 +126,7 @@ several lines):
 
 | Command | Flags |
 |---|---|
-| `run <shell>` | `--no-cache`, `--mount=type=cache,target=/path[,id=…][,sharing=shared\|private\|locked]` |
+| `run <shell>` | `--no-cache`, `--mount=type=cache,target=/path[,id=…][,sharing=shared\|private\|locked]`, `--mount=type=tmpfs,target=/path` |
 | `copy <src>… <dst>` | `--from=<stage>`, `--chmod=0644`, `--chown=UID:GID` |
 | `env NAME=VALUE` | none; everything after the first `=` is the value |
 

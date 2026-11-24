@@ -333,3 +333,24 @@ func TestCollectorErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestTmpfsMount(t *testing.T) {
+	c, err := ParseCommand("run --mount=type=tmpfs,target=/etc/pacman.d/gnupg --mount=type=cache,target=/c pacman-key --init")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := c.(RunCmd)
+	if len(run.Mounts) != 2 || run.Mounts[0] != (Mount{Type: "tmpfs", Target: "/etc/pacman.d/gnupg"}) ||
+		run.Mounts[1] != (Mount{Type: "cache", Target: "/c", ID: "/c", Sharing: "shared"}) || run.Script != "pacman-key --init" {
+		t.Errorf("parsed: %+v", run)
+	}
+	for _, bad := range []string{
+		"run --mount=type=tmpfs,target=/x,id=a true",
+		"run --mount=type=bind,target=/x true",
+		"run --mount=type=tmpfs true",
+	} {
+		if _, err := ParseCommand(bad); err == nil {
+			t.Errorf("%q: no error", bad)
+		}
+	}
+}

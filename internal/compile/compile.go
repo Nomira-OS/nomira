@@ -234,6 +234,10 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 				llb.WithCustomNamef("[%s] run %s", scope, firstLine(cmd.Script)),
 			}
 			for _, m := range cmd.Mounts {
+				if m.Type == "tmpfs" {
+					opts = append(opts, llb.AddMount(m.Target, llb.Scratch(), llb.Tmpfs()))
+					continue
+				}
 				sharing := llb.CacheMountShared
 				switch m.Sharing {
 				case "private":
