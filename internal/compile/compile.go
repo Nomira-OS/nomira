@@ -95,14 +95,22 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 
 	// Prepare stages, global and group-local alike. BuildKit builds a stage
 	// when something copies from it; the order here does not matter.
-	for name, st := range r.Prepare {
-		state := baseState(st.From, fmt.Sprintf("prepare %s", name))
-		var err error
-		state, err = applyCommands(state, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, fmt.Sprintf("prepare %s", name))
+	// Stages that start from a phase are built once that phase is done.
+	prepare := func(name string, st recipe.Stage, from llb.State) error {
+		state, err := applyCommands(from, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, fmt.Sprintf("prepare %s", name))
 		if err != nil {
-			return nil, err
+			return err
 		}
 		b.Stages[name] = state
+		return nil
+	}
+	for name, st := range r.Prepare {
+		if st.FromPhase != "" {
+			continue
+		}
+		if err := prepare(name, st, baseState(st.From, fmt.Sprintf("prepare %s", name))); err != nil {
+			return nil, err
+		}
 	}
 
 	// What copy --from= and bind mounts can name: prepare stages, and the
@@ -202,6 +210,15 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		}
 		cur = plan.Output
 		sources[ph.Name] = cur
+		for name, st := range r.Prepare {
+			if st.FromPhase != ph.Name {
+				continue
+			}
+			if err := prepare(name, st, cur); err != nil {
+				return nil, err
+			}
+			sources[name] = b.Stages[name]
+		}
 		b.Phases = append(b.Phases, plan)
 	}
 	b.Final = cur

@@ -178,6 +178,39 @@ EOF
   must_fail secret_missing "tok"
 }
 
+# A prepare stage that starts from a phase: built from the system after
+# that phase, cached as long as that phase is, never part of the image.
+case_stage_from_phase() {
+  recipe stage_from_phase <<'EOF'
+prepare:
+  derived:
+    from: packages
+    commands:
+      - run mkdir /out && cat /etc/pkgs > /out/derived
+phases:
+  - name: packages
+    groups:
+      p: ["run echo pkgs-NONCE > /etc/pkgs"]
+  - name: config
+    groups:
+      c: ["copy files/conf /etc/conf"]
+  - name: use
+    groups:
+      u: ["run --mount=type=bind,from=derived,source=/out,target=/d cp /d/derived /etc/derived"]
+EOF
+  nonce="$(date +%s%N)"
+  sed -i "s/NONCE/$nonce/" "$work/stage_from_phase/recipe.yml"
+  echo one > "$work/stage_from_phase/files/conf"
+  must_build stage_from_phase || return 0
+  has stage_from_phase etc/derived "pkgs-$nonce"
+  hasnot stage_from_phase out
+  # A change after the phase leaves the stage cached.
+  echo two > "$work/stage_from_phase/files/conf"
+  must_build stage_from_phase || return 0
+  has stage_from_phase etc/conf two
+  cached stage_from_phase '[prepare derived] run mkdir /out'
+}
+
 case_groups_merge() {
   recipe groups_merge <<'EOF'
 phases:
@@ -512,7 +545,7 @@ all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_is
 delete_alone_is_fine allow_identical shared rewrite_counts_as_write serial_phases
 collectors long_form_and_includes expects independent_of_base fallback_symlink
 fallback_mode fallback_type isolated_single_group tmpfs_mount
-context_excludes_output uki secret_mount"
+context_excludes_output uki secret_mount stage_from_phase"
 
 for c in ${*:-$all}; do
   count=$((count + 1))

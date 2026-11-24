@@ -306,7 +306,61 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		r.Phases[i].Collect = &run
 		r.Phases[i].Items = list
 	}
+	if err := linkStagesToPhases(r); err != nil {
+		return nil, err
+	}
 	return r, nil
+}
+
+// linkStagesToPhases marks the prepare stages that start from a phase and
+// checks that only later phases use them.
+func linkStagesToPhases(r *Recipe) error {
+	index := map[string]int{}
+	for i, ph := range r.Phases {
+		index[ph.Name] = i
+	}
+	for name, st := range r.Prepare {
+		if _, ok := index[st.From]; ok {
+			st.FromPhase = st.From
+			r.Prepare[name] = st
+		}
+	}
+	check := func(i int, from string) error {
+		st, ok := r.Prepare[from]
+		if !ok || st.FromPhase == "" {
+			return nil
+		}
+		if index[st.FromPhase] >= i {
+			return errf("recipe: phase %q uses prepare stage %q, which starts from phase %q; only later phases can use it", r.Phases[i].Name, from, st.FromPhase)
+		}
+		return nil
+	}
+	for i, ph := range r.Phases {
+		var cmds []Command
+		if ph.Collect != nil {
+			cmds = append(cmds, *ph.Collect)
+		}
+		for _, g := range ph.Groups {
+			cmds = append(cmds, g.Commands...)
+		}
+		for _, c := range cmds {
+			switch c := c.(type) {
+			case CopyCmd:
+				if err := check(i, c.From); err != nil {
+					return err
+				}
+			case RunCmd:
+				for _, m := range c.Mounts {
+					if m.Type == "bind" {
+						if err := check(i, m.From); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
 }
 
 const (

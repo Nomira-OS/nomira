@@ -447,3 +447,36 @@ func TestSecretMount(t *testing.T) {
 		}
 	}
 }
+
+func TestStageFromPhase(t *testing.T) {
+	files := func(use string) map[string]string {
+		return map[string]string{"recipe.yml": `
+settings: {base: x}
+prepare:
+  initramfs:
+    from: packages
+    commands: ['run true']
+phases:
+  - name: early
+    groups:
+      g: ['` + use + `']
+  - name: packages
+    groups:
+      p: ['run true']
+  - name: late
+    groups:
+      g: ['` + use + `']
+`}
+	}
+	if _, err := ParseFile("recipe.yml", mapReader(files("run true")), nil); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := ParseFile("recipe.yml", mapReader(files("run true")), nil)
+	if r.Prepare["initramfs"].FromPhase != "packages" {
+		t.Errorf("FromPhase: %+v", r.Prepare["initramfs"])
+	}
+	// Used by a phase before packages: rejected.
+	if _, err := ParseFile("recipe.yml", mapReader(files("run --mount=type=bind,from=initramfs,target=/i true")), nil); err == nil {
+		t.Error("stage used before its phase: accepted")
+	}
+}

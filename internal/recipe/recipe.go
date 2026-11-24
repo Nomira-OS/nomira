@@ -74,8 +74,12 @@ type Settings struct {
 
 // Stage is a named prepare stage with its own base image.
 type Stage struct {
-	From     string
-	Commands []Command
+	From string
+	// FromPhase is set when From names a phase: the stage then starts from
+	// the system as it is after that phase, and only phases after it may
+	// use the stage.
+	FromPhase string
+	Commands  []Command
 }
 
 // Group is one independent unit of a phase.

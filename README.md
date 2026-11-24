@@ -141,12 +141,29 @@ end up in the image configuration.
 
 **`from=` and `--from=`** name a prepare stage or a phase that comes
 earlier; a phase stands for the system as it is after that phase. A bind
-mount is read-only and never ends up in the image. With both, a recipe
-can end the way bootc builds a sealed image: one phase takes the kernel
-out, the next builds a unified kernel image from the system without it,
-with the kernel taken from the phase before:
+mount is read-only and never ends up in the image.
+
+**A prepare stage can start from a phase** (`from: packages`): it is
+built from the system after that phase, is cached as long as that phase
+is, and only phases after it can use it. Nothing of it ends up in the
+image unless a later phase copies it.
+
+Together they let a recipe end the way bootc builds a sealed image, with
+a unified kernel image whose initramfs is only rebuilt when the packages
+change:
 
 ```yaml
+prepare:
+  initramfs:
+    from: packages
+    commands:
+      - >-
+        run --mount=type=tmpfs,target=/tmp mkdir /out &&
+        for d in /usr/lib/modules/*/; do k="$(basename "$d")";
+        TMPDIR=/tmp dracut --kver "$k" "/out/$k.img"; done
+
+phases:
+  # … packages, features, services …
   - name: kernel
     groups:
       out: ["run rm /usr/lib/modules/*/vmlinuz /usr/lib/modules/*/initramfs.img"]
@@ -155,11 +172,14 @@ with the kernel taken from the phase before:
       uki:
         - >-
           run --mount=type=bind,from=kernel,target=/target
-          --mount=type=bind,from=services,source=/usr/lib/modules,target=/kernels
+          --mount=type=bind,from=packages,source=/usr/lib/modules,target=/kernels
+          --mount=type=bind,from=initramfs,source=/out,target=/initramfs
+          --mount=type=tmpfs,target=/tmp
           mkdir -p /boot/EFI/Linux &&
-          for d in /kernels/*; do
-          bootc container ukify --rootfs /target --kernel-dir "$d" --
-          --output "/boot/EFI/Linux/$(basename "$d").efi"; done
+          for d in /kernels/*; do k="$(basename "$d")"; mkdir "/tmp/$k" &&
+          cp "$d/vmlinuz" "/tmp/$k/" && cp "/initramfs/$k.img" "/tmp/$k/initramfs.img" &&
+          bootc container ukify --rootfs /target --kernel-dir "/tmp/$k" --
+          --output "/boot/EFI/Linux/$k.efi"; done
 ```
 
 **Secrets:** `--mount=type=secret,id=ID` makes a file the client passes
