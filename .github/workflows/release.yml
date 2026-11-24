@@ -19,10 +19,10 @@ permissions:
 
 jobs:
   checks:
-    uses: Nomira-OS/ci/.github/workflows/checks.yml@e14d8f7748cff6d020bcc90f2cd2dbcb273a602d # main
+    uses: Nomira-OS/ci/.github/workflows/checks.yml@6628e88fa72d26b1aff5668d76b468e4c7da6962 # main
 
   go:
-    uses: Nomira-OS/ci/.github/workflows/go.yml@e14d8f7748cff6d020bcc90f2cd2dbcb273a602d # main
+    uses: Nomira-OS/ci/.github/workflows/go.yml@6628e88fa72d26b1aff5668d76b468e4c7da6962 # main
     with:
       trivy: true
       extra: |
@@ -34,7 +34,7 @@ jobs:
     needs: [checks, go]
     permissions:
       contents: write
-    uses: Nomira-OS/ci/.github/workflows/release.yml@e14d8f7748cff6d020bcc90f2cd2dbcb273a602d # main
+    uses: Nomira-OS/ci/.github/workflows/release.yml@6628e88fa72d26b1aff5668d76b468e4c7da6962 # main
     with:
       channel: ${{ inputs.channel }}
       dry-run: ${{ inputs.dry-run }}
@@ -52,7 +52,7 @@ jobs:
       attestations: write
       security-events: write
       actions: read
-    uses: Nomira-OS/ci/.github/workflows/image.yml@e14d8f7748cff6d020bcc90f2cd2dbcb273a602d # main
+    uses: Nomira-OS/ci/.github/workflows/image.yml@6628e88fa72d26b1aff5668d76b468e4c7da6962 # main
     with:
       image: ghcr.io/nomira-os/nomira
       file: Dockerfile.frontend

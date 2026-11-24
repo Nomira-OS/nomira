@@ -14,7 +14,7 @@
 settings:
   name: mysystem
   description: Example system with kmscon, NetworkManager and AppArmor
-  base: ghcr.io/nomira-os/nomira-image:2026.11.13
+  base: ghcr.io/nomira-os/arch-base:2026.11.13
   labels:
     org.opencontainers.image.source: https://github.com/Nomira-OS/nomira
   env:

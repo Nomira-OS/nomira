@@ -367,7 +367,7 @@ The frontend is one part of [nomira](https://github.com/Nomira-OS): there
 a recipe describes a whole operating system, which is built as a bootc
 image and switched to atomically. The other parts are the
 [CLI](https://github.com/Nomira-OS/nomira-cli) and a minimal
-[Arch base image](https://github.com/Nomira-OS/nomira-image). That is
+[Arch base image](https://github.com/Nomira-OS/arch-base). That is
 where the model pays off: a system consists of many parts that have
 nothing to do with each other (terminal, network, boot loader), and a
 change to one should not rebuild all the others.

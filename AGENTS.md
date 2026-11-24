@@ -15,10 +15,10 @@ must keep README, example and tests in step. The image tag stays
 
 Sibling repositories in the Nomira-OS organization:
 
-- `nomira-cli`: command line wrapper (build, validate, `bootc switch`). It
+- `nomira-cli`: command line (build, check, publish for bootc). It
   knows this frontend only as a container image and must never import
   code from here.
-- `nomira-image`: the minimal Arch Linux bootc base image.
+- `arch-base`: the minimal Arch Linux bootc base image.
 - `nomira-web`: the reference OS recipe and the website.
 
 ## Layout

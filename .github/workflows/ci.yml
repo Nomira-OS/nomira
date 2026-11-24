@@ -14,10 +14,10 @@ concurrency:
 
 jobs:
   checks:
-    uses: Nomira-OS/ci/.github/workflows/checks.yml@e14d8f7748cff6d020bcc90f2cd2dbcb273a602d # main
+    uses: Nomira-OS/ci/.github/workflows/checks.yml@6628e88fa72d26b1aff5668d76b468e4c7da6962 # main
 
   go:
-    uses: Nomira-OS/ci/.github/workflows/go.yml@e14d8f7748cff6d020bcc90f2cd2dbcb273a602d # main
+    uses: Nomira-OS/ci/.github/workflows/go.yml@6628e88fa72d26b1aff5668d76b468e4c7da6962 # main
     with:
       trivy: true
       extra: |
@@ -67,7 +67,7 @@ jobs:
         if: failure()
         run: docker logs --tail 200 buildkitd
 
-  # The short commit hash, as nomira-image uses it: sha-1a2b3c4.
+  # The short commit hash, as arch-base uses it: sha-1a2b3c4.
   tag:
     runs-on: ubuntu-26.04
     outputs:
@@ -87,7 +87,7 @@ jobs:
       attestations: write
       security-events: write
       actions: read
-    uses: Nomira-OS/ci/.github/workflows/image.yml@e14d8f7748cff6d020bcc90f2cd2dbcb273a602d # main
+    uses: Nomira-OS/ci/.github/workflows/image.yml@6628e88fa72d26b1aff5668d76b468e4c7da6962 # main
     with:
       image: ghcr.io/nomira-os/nomira
       file: Dockerfile.frontend
