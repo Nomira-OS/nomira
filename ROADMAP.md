@@ -39,6 +39,14 @@ inherited from the Arch Linux image. Recipes can set
 `org.opencontainers.image.version` in `settings.labels`; a sensible
 default is still open.
 
+### Fewer initramfs builds (recipes)
+
+The initramfs stage runs dracut again whenever its phase changes, even
+when the result is the same bytes. If that turns out too slow, skip
+dracut when none of its inputs changed: keep the last image and the
+checksums of the files it was built from in a cache mount. The hard part
+is knowing dracut's inputs, new firmware for instance, without running it.
+
 ## To be tried on a real machine
 
 - `bootc upgrade` taking new images from the directory `nomira build`
@@ -48,6 +56,9 @@ default is still open.
   fs-verity enforced, `bootctl list` showing the UKI.
 - `--block-setup tpm2-luks` with a UKI.
 - The first user from `systemd-homed-firstboot` ending up in `wheel`.
-- Soft reboots between images that share kernel and initramfs.
+- Soft reboots between images that share kernel and initramfs: after
+  installing a package that adds nothing to the initramfs (nano, say),
+  the rebuilt initramfs must have the same checksum, so that
+  `bootc status --verbose` shows the new image as soft-rebootable.
 - Builds as a normal user (podman-managed buildkitd) on a development
   machine.
