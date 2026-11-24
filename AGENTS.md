@@ -46,7 +46,7 @@ go run ./cmd/frontend lint examples/recipe.yml
 ```
 
 CI runs exactly these through the shared workflows in `Nomira-OS/ci`,
-then publishes the frontend image as `sha-<commit>`. Change CI behaviour
+then publishes the frontend image as `sha-<short commit>`. Change CI behaviour
 there, not here.
 
 ## Rules

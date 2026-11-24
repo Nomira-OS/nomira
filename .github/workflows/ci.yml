@@ -67,10 +67,19 @@ jobs:
         if: failure()
         run: docker logs --tail 200 buildkitd
 
+  # The short commit hash, as nomira-image uses it: sha-1a2b3c4.
+  tag:
+    runs-on: ubuntu-26.04
+    outputs:
+      sha-tag: ${{ steps.t.outputs.sha-tag }}
+    steps:
+      - id: t
+        run: echo "sha-tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
   # Every commit on main is published as an immutable development build,
-  # sha-<commit>. Releases are cut by hand with the release workflow.
+  # sha-<short commit>. Releases are cut by hand with the release workflow.
   image:
-    needs: [go, e2e]
+    needs: [go, e2e, tag]
     permissions:
       contents: read
       packages: write
@@ -84,5 +93,5 @@ jobs:
       file: Dockerfile.frontend
       platforms: linux/amd64,linux/arm64
       fail-on-vulnerabilities: true
-      tags: sha-${{ github.sha }}
+      tags: ${{ needs.tag.outputs.sha-tag }}
       push: ${{ github.event_name != 'pull_request' }}

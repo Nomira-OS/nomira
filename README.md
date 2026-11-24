@@ -272,7 +272,7 @@ The frontend image is published as `ghcr.io/nomira-os/nomira`, for
   `final`) and carry the version number as their tag. Every release also
   moves `1-alpha`, which recipes refer to.
 - **Every commit on `main`** is published as the immutable development
-  build `sha-<commit>`.
+  build `sha-<short commit>`, such as `sha-f7728e3`.
 
 Version and changelog follow from the Conventional Commits, see
 [Nomira-OS/ci](https://github.com/Nomira-OS/ci). Building locally works
