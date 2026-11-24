@@ -6,7 +6,6 @@ package frontend
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -82,17 +81,8 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read image config of base %s: %w", r.Settings.Base, err)
 	}
-	final := b.Final
-	uki, err := wantUKI(opts[keyUKI], r.Settings.UKI, base)
-	if err != nil {
-		return nil, err
-	}
-	if uki {
-		final = compile.WithUKI(final)
-	}
-
 	// Solve the final state.
-	def, err := final.Marshal(ctx)
+	def, err := b.Final.Marshal(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("marshal final state: %w", err)
 	}
@@ -306,33 +296,3 @@ func resolveBaseConfig(ctx context.Context, c client.Client, ref string) ([]byte
 	return cfg, err
 }
 
-// keyUKI is the frontend option that turns the UKI on or off, overriding
-// settings.uki: --opt uki=false.
-const keyUKI = "uki"
-
-// wantUKI decides whether the image gets a unified kernel image: the
-// frontend option, else settings.uki, else whether the base image is a
-// bootc image, which brings bootc and ukify.
-func wantUKI(opt string, setting *bool, baseConfig []byte) (bool, error) {
-	switch opt {
-	case "":
-	case "true", "1":
-		return true, nil
-	case "false", "0":
-		return false, nil
-	default:
-		return false, fmt.Errorf("option uki=%q: expected true or false", opt)
-	}
-	if setting != nil {
-		return *setting, nil
-	}
-	var img struct {
-		Config struct {
-			Labels map[string]string
-		} `json:"config"`
-	}
-	if err := json.Unmarshal(baseConfig, &img); err != nil {
-		return false, fmt.Errorf("parse base image config: %w", err)
-	}
-	return img.Config.Labels["containers.bootc"] == "1", nil
-}

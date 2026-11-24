@@ -2,7 +2,6 @@ package compile
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"testing"
 
@@ -179,20 +178,3 @@ func TestDecideFallsBack(t *testing.T) {
 	}
 }
 
-func TestWithUKI(t *testing.T) {
-	def, err := WithUKI(llb.Image("localhost/sys:1")).Marshal(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, m := range def.Metadata {
-		if n := m.Description["llb.customname"]; strings.HasPrefix(n, "[uki]") {
-			names = append(names, n)
-		}
-	}
-	sort.Strings(names)
-	want := "[uki] add the unified kernel image to /boot,[uki] build the unified kernel image,[uki] empty ukify.conf,[uki] move kernel and initramfs out of the image"
-	if got := strings.Join(names, ","); got != want {
-		t.Errorf("steps: %s", got)
-	}
-}

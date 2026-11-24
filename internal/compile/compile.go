@@ -105,6 +105,13 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		b.Stages[name] = state
 	}
 
+	// What copy --from= and bind mounts can name: prepare stages, and the
+	// result of every phase once it is done.
+	sources := map[string]llb.State{}
+	for name, st := range b.Stages {
+		sources[name] = st
+	}
+
 	// Phases.
 	cur := baseState(r.Settings.Base, "base")
 	for _, ph := range r.Phases {
@@ -120,7 +127,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		if ph.IsCollector() {
 			plan.Output = cur
 			if len(ph.Items) > 0 {
-				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, b.Stages, "collect "+ph.Name)
+				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, sources, "collect "+ph.Name)
 				if err != nil {
 					return nil, err
 				}
@@ -132,7 +139,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			alone := map[string]llb.State{}
 			for _, g := range names {
 				if grp := ph.Groups[g]; !grp.HasRun() {
-					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, b.Stages, fmt.Sprintf("%s/%s", ph.Name, g))
+					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, sources, fmt.Sprintf("%s/%s", ph.Name, g))
 					if err != nil {
 						return nil, err
 					}
@@ -160,7 +167,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 						scope += ", WARNING: not independent of earlier state: " + reason
 					}
 				}
-				upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, b.Stages, scope)
+				upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, sources, scope)
 				if err != nil {
 					return nil, err
 				}
@@ -194,6 +201,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			}
 		}
 		cur = plan.Output
+		sources[ph.Name] = cur
 		b.Phases = append(b.Phases, plan)
 	}
 	b.Final = cur
@@ -236,6 +244,14 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 			for _, m := range cmd.Mounts {
 				if m.Type == "tmpfs" {
 					opts = append(opts, llb.AddMount(m.Target, llb.Scratch(), llb.Tmpfs()))
+					continue
+				}
+				if m.Type == "bind" {
+					src, ok := stages[m.From]
+					if !ok {
+						return st, fmt.Errorf("%s: --mount from=%s: no such stage or phase", scope, m.From)
+					}
+					opts = append(opts, llb.AddMount(m.Target, src, llb.SourcePath(m.Source), llb.Readonly))
 					continue
 				}
 				sharing := llb.CacheMountShared

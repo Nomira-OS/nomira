@@ -8,7 +8,9 @@ import (
 
 // ParseCommand parses one verb-first command string:
 //
-//	run [--no-cache] [--mount=type=cache,target=/path[,id=ID][,sharing=shared|private|locked]]... [--mount=type=tmpfs,target=/path]... <shell script>
+//	run [--no-cache] [--mount=type=cache,target=/path[,id=ID][,sharing=shared|private|locked]]...
+//	    [--mount=type=tmpfs,target=/path]... [--mount=type=bind,from=NAME,target=/path[,source=/path]]...
+//	    <shell script>
 //	env NAME=VALUE
 //	copy [--from=STAGE] [--chmod=0644] [--chown=UID:GID] <src>... <dst>
 //
@@ -97,14 +99,18 @@ func parseMount(spec string) (Mount, error) {
 		}
 		switch k {
 		case "type":
-			if v != "cache" && v != "tmpfs" {
-				return m, errf("run: --mount type %q not supported (\"cache\" or \"tmpfs\")", v)
+			if v != "cache" && v != "tmpfs" && v != "bind" {
+				return m, errf("run: --mount type %q not supported (\"cache\", \"tmpfs\" or \"bind\")", v)
 			}
 			m.Type = v
 		case "target", "dst", "destination":
 			m.Target = v
 		case "id":
 			m.ID = v
+		case "from":
+			m.From = v
+		case "source", "src":
+			m.Source = v
 		case "sharing":
 			if v != "shared" && v != "private" && v != "locked" {
 				return m, errf("run: --mount sharing %q invalid (shared|private|locked)", v)
@@ -114,12 +120,26 @@ func parseMount(spec string) (Mount, error) {
 			return m, errf("run: unknown --mount option %q", k)
 		}
 	}
+	if m.Type != "bind" && (m.From != "" || m.Source != "") {
+		return m, errf("run: from= and source= apply to type=bind only")
+	}
 	switch m.Type {
 	case "":
-		return m, errf("run: --mount requires type=cache or type=tmpfs")
-	case "tmpfs":
+		return m, errf("run: --mount requires type=cache, type=tmpfs or type=bind")
+	case "tmpfs", "bind":
 		if m.ID != "" || m.Sharing != "" {
 			return m, errf("run: id= and sharing= apply to type=cache only")
+		}
+		if m.Type == "bind" {
+			if m.From == "" {
+				return m, errf("run: --mount=type=bind requires from= (a prepare stage or an earlier phase)")
+			}
+			if m.Source == "" {
+				m.Source = "/"
+			}
+			if !strings.HasPrefix(m.Source, "/") {
+				return m, errf("run: --mount source= must be an absolute path")
+			}
 		}
 	case "cache":
 		if m.ID == "" {

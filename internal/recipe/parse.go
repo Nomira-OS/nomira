@@ -28,7 +28,6 @@ type rawSettings struct {
 	Description string            `yaml:"description"`
 	Labels      map[string]string `yaml:"labels"`
 	Env         map[string]string `yaml:"env"`
-	UKI         *bool             `yaml:"uki"`
 	Platforms   []string          `yaml:"platforms"`
 	Tags        []string          `yaml:"tags"`
 }
@@ -103,7 +102,6 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Description: ExpandArgs(raw.Settings.Description, args),
 			Labels:      expandMap(raw.Settings.Labels, args),
 			Env:         expandMap(raw.Settings.Env, args),
-			UKI:         raw.Settings.UKI,
 			Platforms:   raw.Settings.Platforms,
 			Tags:        raw.Settings.Tags,
 		},
@@ -175,7 +173,13 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			collectors[rp.Name] = true
 		}
 	}
+	for name := range raw.Prepare {
+		if seenPhase[name] {
+			return nil, errf("recipe: %q is both a prepare stage and a phase", name)
+		}
+	}
 	items := map[string]map[string]bool{} // collector -> set of items
+	earlier := map[string]bool{}          // phases before the current one
 	for _, rp := range phases {
 		ph := Phase{
 			Name:       rp.Name,
@@ -198,6 +202,7 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 				return nil, errf("recipe: phase %q: collect must contain %s", rp.Name, itemsRef)
 			}
 			r.Phases = append(r.Phases, ph)
+			earlier[rp.Name] = true
 			continue
 		}
 		if !validPolicy(rp.Validation) {
@@ -231,13 +236,11 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 				if err != nil {
 					return nil, errf("%s: command %d: %w", where, i+1, err)
 				}
-				if cc, ok := cmd.(CopyCmd); ok && cc.From != "" {
-					if qual, isLocal := local[cc.From]; isLocal {
-						cc.From = qual
-						cmd = cc
-					} else if _, exists := raw.Prepare[cc.From]; !exists {
-						return nil, errf("%s: copy --from=%s references an unknown prepare stage", where, cc.From)
-					}
+				resolve := func(name string) (string, error) {
+					return resolveFrom(name, local, raw.Prepare, earlier, seenPhase)
+				}
+				if cmd, err = resolveSources(cmd, resolve); err != nil {
+					return nil, errf("%s: command %d: %w", where, i+1, err)
 				}
 				grp.Commands = append(grp.Commands, cmd)
 			}
@@ -269,6 +272,7 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			ph.Groups[gname] = grp
 		}
 		r.Phases = append(r.Phases, ph)
+		earlier[rp.Name] = true
 	}
 
 	// Collectors: fill in what the groups contributed. The items are sorted
@@ -288,6 +292,17 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		if !ok {
 			return nil, errf("recipe: phase %q: collect must be a run command", rp.Name)
 		}
+		before := map[string]bool{}
+		for _, p := range phases[:i] {
+			before[p.Name] = true
+		}
+		resolved, err := resolveSources(run, func(name string) (string, error) {
+			return resolveFrom(name, nil, raw.Prepare, before, seenPhase)
+		})
+		if err != nil {
+			return nil, errf("recipe: phase %q: collect: %w", rp.Name, err)
+		}
+		run = resolved.(RunCmd)
 		r.Phases[i].Collect = &run
 		r.Phases[i].Items = list
 	}
@@ -315,6 +330,13 @@ func buildStage(fs flatStage, args map[string]string) (Stage, error) {
 		}
 		if cc, ok := cmd.(CopyCmd); ok && cc.From != "" {
 			return Stage{}, errf("copy --from inside prepare stages is not supported yet")
+		}
+		if rc, ok := cmd.(RunCmd); ok {
+			for _, m := range rc.Mounts {
+				if m.Type == "bind" {
+					return Stage{}, errf("--mount=type=bind inside prepare stages is not supported yet")
+				}
+			}
 		}
 		st.Commands = append(st.Commands, cmd)
 	}
@@ -446,4 +468,54 @@ func checkEnvNames(where string, env map[string]string) error {
 		}
 	}
 	return nil
+}
+
+// resolveFrom checks the name in copy --from= or --mount=type=bind,from=
+// and returns what the compiler looks up: a stage local to the group (by
+// its qualified name), a prepare stage, or a phase that comes before.
+func resolveFrom(name string, local map[string]string, stages map[string]rawStage, earlier, phases map[string]bool) (string, error) {
+	if qual, ok := local[name]; ok {
+		return qual, nil
+	}
+	if _, ok := stages[name]; ok {
+		return name, nil
+	}
+	if earlier[name] {
+		return name, nil
+	}
+	if phases[name] {
+		return "", errf("from=%s: a phase can only use phases that come before it", name)
+	}
+	return "", errf("from=%s: no prepare stage or phase of that name", name)
+}
+
+// resolveSources resolves the stage and phase names in a command.
+func resolveSources(cmd Command, resolve func(string) (string, error)) (Command, error) {
+	switch c := cmd.(type) {
+	case CopyCmd:
+		if c.From != "" {
+			from, err := resolve(c.From)
+			if err != nil {
+				return nil, err
+			}
+			c.From = from
+		}
+		return c, nil
+	case RunCmd:
+		mounts := make([]Mount, len(c.Mounts))
+		copy(mounts, c.Mounts)
+		for i, m := range mounts {
+			if m.Type != "bind" {
+				continue
+			}
+			from, err := resolve(m.From)
+			if err != nil {
+				return nil, err
+			}
+			mounts[i].From = from
+		}
+		c.Mounts = mounts
+		return c, nil
+	}
+	return cmd, nil
 }

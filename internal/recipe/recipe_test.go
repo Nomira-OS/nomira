@@ -354,3 +354,75 @@ func TestTmpfsMount(t *testing.T) {
 		}
 	}
 }
+
+func TestBindMountsAndPhaseSources(t *testing.T) {
+	recipe := func(body string) map[string]string {
+		return map[string]string{"recipe.yml": "settings: {base: x}\nprepare:\n  tools:\n    from: y\n    commands: ['run true']\nphases:\n" + body}
+	}
+	good := recipe(`
+  - name: system
+    groups:
+      a: ['run true']
+  - name: kernel
+    groups:
+      k: ['run rm -f /vmlinuz']
+  - name: uki
+    groups:
+      u:
+        - run --mount=type=bind,from=kernel,target=/target --mount=type=bind,from=system,source=/usr/lib/modules,target=/kernels --mount=type=bind,from=tools,target=/t ls /target
+        - copy --from=system /etc/hostname /etc/hostname
+`)
+	r, err := ParseFile("recipe.yml", mapReader(good), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := r.Phases[2].Groups["u"].Commands[0].(RunCmd)
+	want := []Mount{
+		{Type: "bind", From: "kernel", Source: "/", Target: "/target"},
+		{Type: "bind", From: "system", Source: "/usr/lib/modules", Target: "/kernels"},
+		{Type: "bind", From: "tools", Source: "/", Target: "/t"},
+	}
+	for i, m := range want {
+		if run.Mounts[i] != m {
+			t.Errorf("mount %d: %+v, want %+v", i, run.Mounts[i], m)
+		}
+	}
+	if c := r.Phases[2].Groups["u"].Commands[1].(CopyCmd); c.From != "system" {
+		t.Errorf("copy --from: %q", c.From)
+	}
+
+	for name, body := range map[string]string{
+		"later phase": `
+  - name: a
+    groups:
+      g: ['run --mount=type=bind,from=b,target=/x true']
+  - name: b
+    groups:
+      g: ['run true']
+`,
+		"own phase": `
+  - name: a
+    groups:
+      g: ['copy --from=a /x /y']
+`,
+		"unknown": `
+  - name: a
+    groups:
+      g: ['run --mount=type=bind,from=nope,target=/x true']
+`,
+		"stage and phase": `
+  - name: tools
+    groups:
+      g: ['run true']
+`,
+		"bind without from": `
+  - name: a
+    groups:
+      g: ['run --mount=type=bind,target=/x true']
+`,
+	} {
+		if _, err := ParseFile("recipe.yml", mapReader(recipe(body)), nil); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

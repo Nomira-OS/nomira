@@ -32,7 +32,6 @@ recipe() {
   {
     printf 'settings:\n  name: e2e\n  base: %s\n' "${RECIPE_BASE:-$BASE}"
     [ -z "$TOOLBOX" ] || printf '  toolbox: %s\n' "$TOOLBOX"
-    [ -z "${RECIPE_SETTINGS:-}" ] || printf '  %s\n' "$RECIPE_SETTINGS"
     cat
   } > "$d/recipe.yml"
 }
@@ -119,38 +118,36 @@ EOF
   must_fail context_excludes_output "big"
 }
 
-# The UKI steps against a stand-in for bootc: it moves the kernel like
-# bootc does, and its "UKI" holds the kernel, the initramfs and the file
-# list of the root file system it was given.
+# Bind mounts from earlier phases, as a recipe uses them for a unified
+# kernel image, against a stand-in for bootc: its "UKI" holds the kernel,
+# the initramfs and the file list of the root file system it was given.
 case_uki() {
-  RECIPE_SETTINGS="uki: true" recipe uki <<'EOF'
+  recipe uki <<'EOF'
 phases:
   - name: system
     groups:
       fake:
         - copy --chmod=0755 files/bootc /usr/bin/bootc
         - run mkdir -p /usr/lib/modules/7.0 && echo kernel > /usr/lib/modules/7.0/vmlinuz && echo initrd > /usr/lib/modules/7.0/initramfs.img && echo dep > /usr/lib/modules/7.0/modules.dep
+  - name: kernel
+    groups:
+      out: ["run rm /usr/lib/modules/*/vmlinuz /usr/lib/modules/*/initramfs.img"]
+  - name: uki
+    groups:
+      uki:
+        - run --mount=type=bind,from=kernel,target=/target --mount=type=bind,from=system,source=/usr/lib/modules,target=/kernels mkdir -p /boot/EFI/Linux && for d in /kernels/*; do bootc container ukify --rootfs /target --kernel-dir "$d" -- --output "/boot/EFI/Linux/$(basename "$d").efi"; done
 EOF
   cat > "$work/uki/files/bootc" <<'EOF'
 #!/bin/sh
 set -eu
-case "$1 $2" in
-"container split-kernel-and-rootfs")
-  for d in "$4"/usr/lib/modules/*/; do
-    k=$(basename "$d"); mkdir -p "$6/$k"; mv "$d/vmlinuz" "$d/initramfs.img" "$6/$k/"
-  done ;;
-"container ukify")
-  { cat "$6/vmlinuz" "$6/initramfs.img"; cat /etc/systemd/ukify.conf
-    find "$4/usr/lib/modules" | sed "s|^$4||" | sort; } > "$9" ;;
-*) exit 2 ;;
-esac
+[ "$1 $2" = "container ukify" ] || exit 2
+{ cat "$6/vmlinuz" "$6/initramfs.img"; find "$4/usr/lib/modules" | sed "s|^$4||" | sort; } > "$9"
 EOF
   must_build uki || return 0
   has uki usr/lib/modules/7.0/modules.dep dep
   hasnot uki usr/lib/modules/7.0/vmlinuz
-  hasnot uki usr/lib/modules/7.0/initramfs.img
-  hasnot uki .nomira-kernel
-  hasnot uki etc/systemd/ukify.conf
+  hasnot uki target
+  hasnot uki kernels
   efi="$work/uki/out/boot/EFI/Linux/7.0.efi"
   [ -f "$efi" ] || { fail "no UKI"; return 0; }
   expected="$(printf 'kernel\ninitrd\n/usr/lib/modules\n/usr/lib/modules/7.0\n/usr/lib/modules/7.0/modules.dep')"

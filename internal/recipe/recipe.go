@@ -65,9 +65,6 @@ type Settings struct {
 	Description string            // becomes the org.opencontainers.image.description label
 	Labels      map[string]string // image labels
 	Env         map[string]string // build-time environment for every run
-	// UKI: add a unified kernel image. nil means: if the base image is a
-	// bootc image (label containers.bootc=1).
-	UKI *bool
 	// Platforms and Tags are declarations for the caller (CLI, CI): the
 	// frontend validates and reports them via `inspect` but builds for the
 	// platform BuildKit asks for and never tags anything itself.
@@ -166,13 +163,15 @@ type Command interface {
 	Raw() string
 }
 
-// Mount is a `--mount=type=cache,...` or `--mount=type=tmpfs,...` flag on
-// a run command. Nothing written below a mount ends up in the layer.
+// Mount is a `--mount=type=...` flag on a run command. Nothing written
+// below a mount ends up in the layer.
 type Mount struct {
-	Type    string // cache | tmpfs
+	Type    string // cache | tmpfs | bind
 	Target  string
 	ID      string // cache only; defaults to Target when empty
 	Sharing string // cache only: shared | private | locked (default shared)
+	From    string // bind only: a prepare stage or an earlier phase
+	Source  string // bind only: path inside From (default /)
 }
 
 // RunCmd executes a shell script via `/bin/sh -c`.

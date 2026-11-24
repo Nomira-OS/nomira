@@ -126,8 +126,8 @@ several lines):
 
 | Command | Flags |
 |---|---|
-| `run <shell>` | `--no-cache`, `--mount=type=cache,target=/path[,id=…][,sharing=shared\|private\|locked]`, `--mount=type=tmpfs,target=/path` |
-| `copy <src>… <dst>` | `--from=<stage>`, `--chmod=0644`, `--chown=UID:GID` |
+| `run <shell>` | `--no-cache`, `--mount=type=cache,target=/path[,id=…][,sharing=shared\|private\|locked]`, `--mount=type=tmpfs,target=/path`, `--mount=type=bind,from=NAME,target=/path[,source=/path]` (read-only) |
+| `copy <src>… <dst>` | `--from=NAME`, `--chmod=0644`, `--chown=UID:GID` |
 | `env NAME=VALUE` | none; everything after the first `=` is the value |
 
 **Args:** `${NAME}` is replaced only for args declared in `settings.args`;
@@ -138,6 +138,29 @@ commands that use it.
 phase to its groups, the `env` command to the rest of its group. The more
 specific one wins. The variables exist only during the build and do not
 end up in the image configuration.
+
+**`from=` and `--from=`** name a prepare stage or a phase that comes
+earlier; a phase stands for the system as it is after that phase. A bind
+mount is read-only and never ends up in the image. With both, a recipe
+can end the way bootc builds a sealed image: one phase takes the kernel
+out, the next builds a unified kernel image from the system without it,
+with the kernel taken from the phase before:
+
+```yaml
+  - name: kernel
+    groups:
+      out: ["run rm /usr/lib/modules/*/vmlinuz /usr/lib/modules/*/initramfs.img"]
+  - name: uki
+    groups:
+      uki:
+        - >-
+          run --mount=type=bind,from=kernel,target=/target
+          --mount=type=bind,from=services,source=/usr/lib/modules,target=/kernels
+          mkdir -p /boot/EFI/Linux &&
+          for d in /kernels/*; do
+          bootc container ukify --rootfs /target --kernel-dir "$d" --
+          --output "/boot/EFI/Linux/$(basename "$d").efi"; done
+```
 
 **`run --no-cache`:** The step always runs, even if BuildKit has it in its
 cache. Everything that builds on it then runs again: the rest of its group
@@ -310,18 +333,6 @@ The result is an ordinary OCI image, for podman for instance:
 ```sh
 skopeo copy oci-archive:img.tar containers-storage:localhost/mysystem
 ```
-
-### Unified kernel image
-
-For a bootc base image (label `containers.bootc=1`) the frontend ends the
-build the way bootc's documentation describes for sealed images: it
-moves kernel and initramfs out of the finished system
-(`bootc container split-kernel-and-rootfs`), builds a unified kernel
-image from them with `bootc container ukify`, whose kernel command line
-carries the composefs digest of the system, and puts it into
-`/boot/EFI/Linux`. Both run in the image itself, with its own bootc and
-ukify. The UKI is not signed yet. `settings.uki` (`true`/`false`) or
-`--opt uki=false` decide instead of the label.
 
 ## Why it was created
 
