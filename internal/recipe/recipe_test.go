@@ -426,3 +426,24 @@ func TestBindMountsAndPhaseSources(t *testing.T) {
 		}
 	}
 }
+
+func TestSecretMount(t *testing.T) {
+	c, err := ParseCommand("run --mount=type=secret,id=db.key,required=true --mount=type=secret,id=tok,target=/t sbsign")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := c.(RunCmd)
+	if run.Mounts[0] != (Mount{Type: "secret", ID: "db.key", Target: "/run/secrets/db.key", Required: true}) ||
+		run.Mounts[1] != (Mount{Type: "secret", ID: "tok", Target: "/t"}) {
+		t.Errorf("parsed: %+v", run.Mounts)
+	}
+	for _, bad := range []string{
+		"run --mount=type=secret,target=/x true",
+		"run --mount=type=secret,id=a/b true",
+		"run --mount=type=cache,target=/x,required=true true",
+	} {
+		if _, err := ParseCommand(bad); err == nil {
+			t.Errorf("%q: no error", bad)
+		}
+	}
+}

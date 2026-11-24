@@ -295,4 +295,3 @@ func resolveBaseConfig(ctx context.Context, c client.Client, ref string) ([]byte
 	_, _, cfg, err := c.ResolveImageConfig(ctx, ref, resolveOpt())
 	return cfg, err
 }
-

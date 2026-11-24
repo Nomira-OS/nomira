@@ -10,6 +10,7 @@ import (
 //
 //	run [--no-cache] [--mount=type=cache,target=/path[,id=ID][,sharing=shared|private|locked]]...
 //	    [--mount=type=tmpfs,target=/path]... [--mount=type=bind,from=NAME,target=/path[,source=/path]]...
+//	    [--mount=type=secret,id=ID[,target=/path][,required=true]]...
 //	    <shell script>
 //	env NAME=VALUE
 //	copy [--from=STAGE] [--chmod=0644] [--chown=UID:GID] <src>... <dst>
@@ -99,8 +100,8 @@ func parseMount(spec string) (Mount, error) {
 		}
 		switch k {
 		case "type":
-			if v != "cache" && v != "tmpfs" && v != "bind" {
-				return m, errf("run: --mount type %q not supported (\"cache\", \"tmpfs\" or \"bind\")", v)
+			if v != "cache" && v != "tmpfs" && v != "bind" && v != "secret" {
+				return m, errf("run: --mount type %q not supported (cache, tmpfs, bind or secret)", v)
 			}
 			m.Type = v
 		case "target", "dst", "destination":
@@ -109,6 +110,11 @@ func parseMount(spec string) (Mount, error) {
 			m.ID = v
 		case "from":
 			m.From = v
+		case "required":
+			if v != "true" && v != "false" {
+				return m, errf("run: --mount required=%q: expected true or false", v)
+			}
+			m.Required = v == "true"
 		case "source", "src":
 			m.Source = v
 		case "sharing":
@@ -123,9 +129,23 @@ func parseMount(spec string) (Mount, error) {
 	if m.Type != "bind" && (m.From != "" || m.Source != "") {
 		return m, errf("run: from= and source= apply to type=bind only")
 	}
+	if m.Type != "secret" && m.Required {
+		return m, errf("run: required= applies to type=secret only")
+	}
+	if m.Type == "secret" {
+		if m.ID == "" || strings.ContainsAny(m.ID, "/ ") {
+			return m, errf("run: --mount=type=secret requires id= (no slashes)")
+		}
+		if m.Sharing != "" {
+			return m, errf("run: sharing= applies to type=cache only")
+		}
+		if m.Target == "" {
+			m.Target = "/run/secrets/" + m.ID
+		}
+	}
 	switch m.Type {
 	case "":
-		return m, errf("run: --mount requires type=cache, type=tmpfs or type=bind")
+		return m, errf("run: --mount requires type=cache, tmpfs, bind or secret")
 	case "tmpfs", "bind":
 		if m.ID != "" || m.Sharing != "" {
 			return m, errf("run: id= and sharing= apply to type=cache only")

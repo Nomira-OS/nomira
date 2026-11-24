@@ -44,6 +44,7 @@ build() {
     --frontend gateway.v0 --opt source="$FRONTEND" \
     --local context="$d" --local dockerfile="$d" \
     --opt filename=recipe.yml \
+    ${BUILD_SECRET:+--secret "$BUILD_SECRET"} \
     --output type=local,dest="$d/out" \
     --progress=plain > "$d/log" 2>&1
 }
@@ -152,6 +153,29 @@ EOF
   [ -f "$efi" ] || { fail "no UKI"; return 0; }
   expected="$(printf 'kernel\ninitrd\n/usr/lib/modules\n/usr/lib/modules/7.0\n/usr/lib/modules/7.0/modules.dep')"
   [ "$(cat "$efi")" = "$expected" ] || fail "UKI content: $(cat "$efi")"
+}
+
+case_secret_mount() {
+  recipe secret_mount <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run --mount=type=secret,id=tok,required=true wc -c < /run/secrets/tok | tr -d ' ' > /etc/tok-size"]
+EOF
+  printf abc > "$work/secret_mount/tok"
+  BUILD_SECRET="id=tok,src=$work/secret_mount/tok" must_build secret_mount || return 0
+  has secret_mount etc/tok-size 3
+  hasnot secret_mount run/secrets/tok
+  # A required secret that is not given fails the build. (A cached step
+  # would not notice: the secret is not part of the cache key.)
+  recipe secret_missing <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run --mount=type=secret,id=tok,required=true echo missing-$nonce > /etc/x"]
+EOF
+  sed -i "s/\$nonce/$(date +%s%N)/" "$work/secret_missing/recipe.yml"
+  must_fail secret_missing "tok"
 }
 
 case_groups_merge() {
@@ -488,7 +512,7 @@ all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_is
 delete_alone_is_fine allow_identical shared rewrite_counts_as_write serial_phases
 collectors long_form_and_includes expects independent_of_base fallback_symlink
 fallback_mode fallback_type isolated_single_group tmpfs_mount
-context_excludes_output uki"
+context_excludes_output uki secret_mount"
 
 for c in ${*:-$all}; do
   count=$((count + 1))

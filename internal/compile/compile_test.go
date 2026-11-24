@@ -177,4 +177,3 @@ func TestDecideFallsBack(t *testing.T) {
 		t.Errorf("single fallback output: %v", k)
 	}
 }
-

@@ -126,7 +126,7 @@ several lines):
 
 | Command | Flags |
 |---|---|
-| `run <shell>` | `--no-cache`, `--mount=type=cache,target=/path[,id=…][,sharing=shared\|private\|locked]`, `--mount=type=tmpfs,target=/path`, `--mount=type=bind,from=NAME,target=/path[,source=/path]` (read-only) |
+| `run <shell>` | `--no-cache`, `--mount=type=cache,target=/path[,id=…][,sharing=shared\|private\|locked]`, `--mount=type=tmpfs,target=/path`, `--mount=type=bind,from=NAME,target=/path[,source=/path]` (read-only), `--mount=type=secret,id=ID[,target=/path][,required=true]` |
 | `copy <src>… <dst>` | `--from=NAME`, `--chmod=0644`, `--chown=UID:GID` |
 | `env NAME=VALUE` | none; everything after the first `=` is the value |
 
@@ -161,6 +161,12 @@ with the kernel taken from the phase before:
           bootc container ukify --rootfs /target --kernel-dir "$d" --
           --output "/boot/EFI/Linux/$(basename "$d").efi"; done
 ```
+
+**Secrets:** `--mount=type=secret,id=ID` makes a file the client passes
+(`buildctl --secret id=ID,src=PATH`) available at `/run/secrets/ID` for
+that one step, for a signing key for instance. It never ends up in a
+layer or in the cache key; `required=true` fails the step when the
+secret is missing.
 
 **`run --no-cache`:** The step always runs, even if BuildKit has it in its
 cache. Everything that builds on it then runs again: the rest of its group

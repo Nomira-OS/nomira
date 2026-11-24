@@ -166,12 +166,15 @@ type Command interface {
 // Mount is a `--mount=type=...` flag on a run command. Nothing written
 // below a mount ends up in the layer.
 type Mount struct {
-	Type    string // cache | tmpfs | bind
+	Type    string // cache | tmpfs | bind | secret
 	Target  string
 	ID      string // cache only; defaults to Target when empty
 	Sharing string // cache only: shared | private | locked (default shared)
 	From    string // bind only: a prepare stage or an earlier phase
 	Source  string // bind only: path inside From (default /)
+	// secret only: Target defaults to /run/secrets/<ID>; Required makes
+	// the build fail when the client does not provide the secret.
+	Required bool
 }
 
 // RunCmd executes a shell script via `/bin/sh -c`.

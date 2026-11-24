@@ -246,6 +246,16 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 					opts = append(opts, llb.AddMount(m.Target, llb.Scratch(), llb.Tmpfs()))
 					continue
 				}
+				if m.Type == "secret" {
+					// Provided by the client (buildctl --secret); never part
+					// of a layer or of the cache key.
+					sopts := []llb.SecretOption{llb.SecretID(m.ID)}
+					if !m.Required {
+						sopts = append(sopts, llb.SecretOptional)
+					}
+					opts = append(opts, llb.AddSecret(m.Target, sopts...))
+					continue
+				}
 				if m.Type == "bind" {
 					src, ok := stages[m.From]
 					if !ok {
