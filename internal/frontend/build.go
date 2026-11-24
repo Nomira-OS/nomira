@@ -111,6 +111,7 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 func recipeReader(ctx context.Context, c client.Client, filename string) (recipe.ReadFunc, error) {
 	src := llb.Local(localDockerfile,
 		llb.IncludePatterns([]string{filename, "*.yml", "*.yaml", "**/*.yml", "**/*.yaml"}),
+		llb.ExcludePatterns(compile.ContextExcludes),
 		llb.WithCustomName("[recipe] load "+filename),
 	)
 	def, err := src.Marshal(ctx)

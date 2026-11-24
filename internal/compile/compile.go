@@ -78,13 +78,19 @@ type Hooks struct {
 	PhaseDone func(plan PhasePlan) error
 }
 
+// ContextExcludes are never sent from the recipe directory.
+var ContextExcludes = []string{".nomira"}
+
 // Compile builds the full LLB graph for a recipe.
 func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	b := &Build{Recipe: r, Stages: map[string]llb.State{}}
 
+	// .nomira holds the CLI's build output next to the recipe: images of
+	// a gigabyte and more that no recipe copies from.
 	ctxSrc := llb.Local(LocalContext,
 		llb.WithCustomName("[context] load build context"),
 		llb.SharedKeyHint(LocalContext),
+		llb.ExcludePatterns(ContextExcludes),
 	)
 
 	// Prepare stages, global and group-local alike. BuildKit builds a stage
