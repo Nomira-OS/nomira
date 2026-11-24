@@ -311,6 +311,18 @@ The result is an ordinary OCI image, for podman for instance:
 skopeo copy oci-archive:img.tar containers-storage:localhost/mysystem
 ```
 
+### Unified kernel image
+
+For a bootc base image (label `containers.bootc=1`) the frontend ends the
+build the way bootc's documentation describes for sealed images: it
+moves kernel and initramfs out of the finished system
+(`bootc container split-kernel-and-rootfs`), builds a unified kernel
+image from them with `bootc container ukify`, whose kernel command line
+carries the composefs digest of the system, and puts it into
+`/boot/EFI/Linux`. Both run in the image itself, with its own bootc and
+ukify. The UKI is not signed yet. `settings.uki` (`true`/`false`) or
+`--opt uki=false` decide instead of the label.
+
 ## Why it was created
 
 The frontend is one part of [nomira](https://github.com/Nomira-OS): there

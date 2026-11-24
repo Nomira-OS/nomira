@@ -28,6 +28,7 @@ type rawSettings struct {
 	Description string            `yaml:"description"`
 	Labels      map[string]string `yaml:"labels"`
 	Env         map[string]string `yaml:"env"`
+	UKI         *bool             `yaml:"uki"`
 	Platforms   []string          `yaml:"platforms"`
 	Tags        []string          `yaml:"tags"`
 }
@@ -102,6 +103,7 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Description: ExpandArgs(raw.Settings.Description, args),
 			Labels:      expandMap(raw.Settings.Labels, args),
 			Env:         expandMap(raw.Settings.Env, args),
+			UKI:         raw.Settings.UKI,
 			Platforms:   raw.Settings.Platforms,
 			Tags:        raw.Settings.Tags,
 		},

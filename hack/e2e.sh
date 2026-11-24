@@ -32,6 +32,7 @@ recipe() {
   {
     printf 'settings:\n  name: e2e\n  base: %s\n' "${RECIPE_BASE:-$BASE}"
     [ -z "$TOOLBOX" ] || printf '  toolbox: %s\n' "$TOOLBOX"
+    [ -z "${RECIPE_SETTINGS:-}" ] || printf '  %s\n' "$RECIPE_SETTINGS"
     cat
   } > "$d/recipe.yml"
 }
@@ -116,6 +117,44 @@ EOF
   mkdir -p "$work/context_excludes_output/.nomira"
   echo big > "$work/context_excludes_output/.nomira/big"
   must_fail context_excludes_output "big"
+}
+
+# The UKI steps against a stand-in for bootc: it moves the kernel like
+# bootc does, and its "UKI" holds the kernel, the initramfs and the file
+# list of the root file system it was given.
+case_uki() {
+  RECIPE_SETTINGS="uki: true" recipe uki <<'EOF'
+phases:
+  - name: system
+    groups:
+      fake:
+        - copy --chmod=0755 files/bootc /usr/bin/bootc
+        - run mkdir -p /usr/lib/modules/7.0 && echo kernel > /usr/lib/modules/7.0/vmlinuz && echo initrd > /usr/lib/modules/7.0/initramfs.img && echo dep > /usr/lib/modules/7.0/modules.dep
+EOF
+  cat > "$work/uki/files/bootc" <<'EOF'
+#!/bin/sh
+set -eu
+case "$1 $2" in
+"container split-kernel-and-rootfs")
+  for d in "$4"/usr/lib/modules/*/; do
+    k=$(basename "$d"); mkdir -p "$6/$k"; mv "$d/vmlinuz" "$d/initramfs.img" "$6/$k/"
+  done ;;
+"container ukify")
+  { cat "$6/vmlinuz" "$6/initramfs.img"; cat /etc/systemd/ukify.conf
+    find "$4/usr/lib/modules" | sed "s|^$4||" | sort; } > "$9" ;;
+*) exit 2 ;;
+esac
+EOF
+  must_build uki || return 0
+  has uki usr/lib/modules/7.0/modules.dep dep
+  hasnot uki usr/lib/modules/7.0/vmlinuz
+  hasnot uki usr/lib/modules/7.0/initramfs.img
+  hasnot uki .nomira-kernel
+  hasnot uki etc/systemd/ukify.conf
+  efi="$work/uki/out/boot/EFI/Linux/7.0.efi"
+  [ -f "$efi" ] || { fail "no UKI"; return 0; }
+  expected="$(printf 'kernel\ninitrd\n/usr/lib/modules\n/usr/lib/modules/7.0\n/usr/lib/modules/7.0/modules.dep')"
+  [ "$(cat "$efi")" = "$expected" ] || fail "UKI content: $(cat "$efi")"
 }
 
 case_groups_merge() {
@@ -452,7 +491,7 @@ all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_is
 delete_alone_is_fine allow_identical shared rewrite_counts_as_write serial_phases
 collectors long_form_and_includes expects independent_of_base fallback_symlink
 fallback_mode fallback_type isolated_single_group tmpfs_mount
-context_excludes_output"
+context_excludes_output uki"
 
 for c in ${*:-$all}; do
   count=$((count + 1))

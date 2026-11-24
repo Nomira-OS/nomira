@@ -65,6 +65,9 @@ type Settings struct {
 	Description string            // becomes the org.opencontainers.image.description label
 	Labels      map[string]string // image labels
 	Env         map[string]string // build-time environment for every run
+	// UKI: add a unified kernel image. nil means: if the base image is a
+	// bootc image (label containers.bootc=1).
+	UKI *bool
 	// Platforms and Tags are declarations for the caller (CLI, CI): the
 	// frontend validates and reports them via `inspect` but builds for the
 	// platform BuildKit asks for and never tags anything itself.
