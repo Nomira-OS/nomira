@@ -179,7 +179,7 @@ phases:
           mkdir -p /boot/EFI/Linux &&
           for d in /kernels/*; do k="$(basename "$d")"; mkdir "/tmp/$k" &&
           cp "$d/vmlinuz" "/tmp/$k/" && cp "/initramfs/$k.img" "/tmp/$k/initramfs.img" &&
-          bootc container ukify --rootfs /target --kernel-dir "/tmp/$k" --
+          bootc container ukify --rootfs /target --kernel-dir "/tmp/$k" --erofs-version v1-only --
           --output "/boot/EFI/Linux/$k.efi"; done
 ```
 
