@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Nomira-OS/nomira/blob/main/schema/recipe.schema.json",
+  "title": "nomira recipe",
+  "description": "A recipe for the nomira BuildKit frontend, written in YAML. The frontend checks more than this schema: names that from= refers to, items, the order of phases across imports. See the README.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "imports": {
+      "description": "Recipe files merged into this one, in this order, before this file: paths relative to it, or URLs. A URL may end in #sha256=<hex>; an http URL must.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "anyOf": [
+          {"pattern": "^https://"},
+          {"pattern": "^http://.*#sha256=[0-9a-f]{64}$"},
+          {"pattern": "^[^/]", "not": {"pattern": "^https?://"}}
+        ]
+      }
+    },
+    "settings": {"$ref": "#/$defs/settings"},
+    "stages": {
+      "description": "Named stages with an image of their own, for copy --from= and bind mounts.",
+      "type": "object",
+      "propertyNames": {"not": {"anyOf": [{"const": "context"}, {"pattern": "/"}]}},
+      "additionalProperties": {"anyOf": [{"$ref": "#/$defs/stage"}, {"type": "null"}]}
+    },
+    "build": {
+      "description": "The phases, by name, in the order they run.",
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[^/]+$"},
+      "additionalProperties": {"anyOf": [{"$ref": "#/$defs/phase"}, {"type": "null"}]}
+    }
+  },
+  "$defs": {
+    "env": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+      "additionalProperties": {"type": ["string", "null"]}
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "base": {"description": "The base image.", "type": "string", "minLength": 1},
+        "labels": {
+          "description": "Labels on the finished image.",
+          "type": "object",
+          "additionalProperties": {"type": ["string", "null"]}
+        },
+        "env": {
+          "description": "Build-time environment for every run. SOURCE_DATE_EPOCH is set with source_date_epoch.",
+          "allOf": [{"$ref": "#/$defs/env"}, {"not": {"required": ["SOURCE_DATE_EPOCH"]}}]
+        },
+        "mounts": {
+          "description": "Mounts for every run, unless it mounts something at the same target: target → the options of --mount= without target.",
+          "type": "object",
+          "propertyNames": {"pattern": "^/.+"},
+          "additionalProperties": {
+            "anyOf": [
+              {"type": "string", "pattern": "^type=(tmpfs|cache)(,(id|sharing)=[^,]+)*$"},
+              {"type": "null"}
+            ]
+          }
+        },
+        "source_date_epoch": {
+          "description": "Seconds since 1970; true: the base image's creation time (default); false: off.",
+          "type": ["integer", "boolean"],
+          "minimum": 0
+        },
+        "record": {"description": "Record the resolved recipe in the label org.nomira.recipe (default true).", "type": "boolean"}
+      }
+    },
+    "commands": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/command"}
+    },
+    "command": {
+      "description": "run <shell>, copy <src>… <dst> or env NAME=VALUE, with their flags.",
+      "type": "string",
+      "pattern": "^\\s*(run|copy|env)\\s"
+    },
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "commands"],
+      "properties": {
+        "from": {"description": "The image the stage starts from.", "type": "string", "minLength": 1},
+        "commands": {"$ref": "#/$defs/commands", "minItems": 1}
+      }
+    },
+    "collect": {
+      "description": "A run command with ${items}: what all groups contribute under the collector's name.",
+      "type": "string",
+      "pattern": "^\\s*run\\s.*\\$\\{items\\}"
+    },
+    "phase": {
+      "description": "A phase: its groups by name and its env; or, with collect, a single collector named after the phase.",
+      "type": "object",
+      "properties": {
+        "env": {"$ref": "#/$defs/env"},
+        "collect": {"$ref": "#/$defs/collect"}
+      },
+      "if": {"required": ["collect"]},
+      "then": {"propertyNames": {"enum": ["env", "collect"]}},
+      "else": {
+        "minProperties": 1,
+        "properties": {"env": true},
+        "additionalProperties": {"anyOf": [{"$ref": "#/$defs/group"}, {"type": "null"}]}
+      }
+    },
+    "group": {
+      "anyOf": [
+        {"description": "Short form: a list of commands.", "$ref": "#/$defs/commands"},
+        {
+          "description": "A collector.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["collect"],
+          "properties": {"collect": {"$ref": "#/$defs/collect"}}
+        },
+        {
+          "description": "Long form: commands, expects, and contributions to collectors (every other key).",
+          "type": "object",
+          "minProperties": 1,
+          "not": {"anyOf": [{"required": ["collect"]}, {"required": ["env"]}]},
+          "properties": {
+            "commands": {"$ref": "#/$defs/commands"},
+            "expects": {
+              "description": "Paths that must exist in the state the phase starts from.",
+              "type": "array",
+              "items": {"type": "string", "pattern": "^/"}
+            }
+          },
+          "additionalProperties": {
+            "description": "Items for the collector of this name.",
+            "type": "array",
+            "items": {"type": "string", "pattern": "^[A-Za-z0-9@%+=:,./_][A-Za-z0-9@%+=:,./_-]*$"}
+          }
+        }
+      ]
+    }
+  }
+}

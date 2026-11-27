@@ -23,10 +23,9 @@ jobs:
       extra: |
         sh hack/test_lister.sh
         sh hack/test_guard.sh
-        go run ./cmd/frontend lint examples/recipe.yml
 
   # Builds small recipes with a real BuildKit: conflicts, deletions,
-  # collectors, includes, and that groups without run survive a new base
+  # collectors, imports (also by URL), mounts, and that groups without run survive a new base
   # image. See hack/e2e.sh.
   e2e:
     runs-on: ubuntu-26.04
@@ -44,8 +43,12 @@ jobs:
           # BuildKit has to be told that it speaks plain HTTP.
           docker run -d --name registry --network host "registry:${REGISTRY_VERSION}"
           printf '[registry."localhost:5000"]\n  http = true\n  insecure = true\n' > "${RUNNER_TEMP}/buildkitd.toml"
+          # Imports by URL: a plain web server for the case url_import.
+          mkdir -p "${RUNNER_TEMP}/http"
+          (cd "${RUNNER_TEMP}/http" && nohup python3 -m http.server 8099 --bind 127.0.0.1 >/dev/null 2>&1 &)
           docker run -d --name buildkitd --privileged --network host \
             -v "${RUNNER_TEMP}/buildkitd.toml:/etc/buildkit/buildkitd.toml:ro" \
+            -v "${RUNNER_TEMP}/http:/http" \
             -v "${PWD}:/src:ro" \
             "moby/buildkit:${BUILDKIT_VERSION}"
           for i in $(seq 1 30); do
@@ -62,7 +65,10 @@ jobs:
             --opt filename=Dockerfile.frontend \
             --output type=image,name=localhost:5000/nomira:e2e,push=true
       - name: Run the end-to-end tests
-        run: docker exec -e FRONTEND=localhost:5000/nomira:e2e buildkitd sh /src/hack/e2e.sh
+        run: |
+          docker exec -e FRONTEND=localhost:5000/nomira:e2e \
+            -e HTTP_DIR=/http -e HTTP_URL=http://127.0.0.1:8099 \
+            buildkitd sh /src/hack/e2e.sh
       - name: BuildKit log
         if: failure()
         run: docker logs --tail 200 buildkitd

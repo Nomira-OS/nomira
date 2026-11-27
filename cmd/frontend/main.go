@@ -2,45 +2,29 @@
 //
 // Modes:
 //
-//	(no args)        gateway frontend; run by BuildKit via `# syntax=` or
-//	                 `--frontend gateway.v0 --opt source=<image>`
-//	lint  [file|-]   parse + schema-validate a recipe; exit 1 with errors
-//	graph [file|-]   print the pipeline as a Mermaid flowchart
-//	inspect [file|-] print name, base and phase/group names as JSON
-//	version          print the version of the frontend
-//	resolve [file|-] print the recipe with all imports merged, as the
-//	                 image records it in its label org.nomira.recipe
+//	(no args)  gateway frontend; run by BuildKit via `# syntax=` or
+//	           `--frontend gateway.v0 --opt source=<image>`
+//	version    print the version of the frontend
 //
-// lint/graph exist so a thin CLI (in any language) can reuse the Go parser
-// by running this image via podman instead of reimplementing the schema.
+// Linting and resolving a recipe go through BuildKit as well, with the
+// build option mode (see package frontend): the frontend reads the files
+// and imports, local and by URL, the same way as for a build.
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
-	"strconv"
 
 	"github.com/moby/buildkit/frontend/gateway/grpcclient"
 	"github.com/moby/buildkit/util/appcontext"
 
 	"github.com/Nomira-OS/nomira/internal/frontend"
-	"github.com/Nomira-OS/nomira/internal/recipe"
 )
 
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
-		case "lint":
-			os.Exit(lint())
-		case "inspect":
-			os.Exit(inspect())
-		case "graph":
-			os.Exit(graph())
-		case "resolve":
-			os.Exit(resolve())
 		case "version":
 			fmt.Println(frontend.Version)
 			return
@@ -63,128 +47,14 @@ func usage(w io.Writer) {
 	fmt.Fprint(w, `nomira-frontend — BuildKit gateway frontend for nomira recipes
 
 usage:
-  nomira-frontend              run as gateway frontend (BuildKit invokes this)
-  nomira-frontend lint  [f|-]  parse + validate a recipe (default: stdin)
-  nomira-frontend graph [f|-]  print pipeline as Mermaid (default: stdin)
-  nomira-frontend inspect [f|-] print name, base, phases and groups as JSON
-  nomira-frontend resolve [f|-] print the recipe with all imports merged
-  nomira-frontend version       print the version
+  nomira-frontend          run as gateway frontend (BuildKit invokes this)
+  nomira-frontend version  print the version
 
-Recipes that use "imports" must be given as a file path.
+Build options (buildctl --opt):
+  filename=FILE            the recipe in the "dockerfile" local (recipe.yml)
+  mode=build|lint|resolve  build the image (default), only parse the
+                           recipe, or output it with all imports merged
+  image-resolve-mode=default|pull|local
+  toolbox=IMAGE            the image the checks run in
 `)
-}
-
-// load parses the recipe named on the command line, or stdin for "-" or no
-// argument. Imports need a file path: they resolve relative to it.
-func load() (*recipe.Recipe, error) {
-	if len(os.Args) > 2 && os.Args[2] != "-" {
-		dir, entry := filepath.Split(os.Args[2])
-		if dir == "" {
-			dir = "."
-		}
-		return recipe.ParseFile(entry, func(name string) ([]byte, error) {
-			return os.ReadFile(filepath.Join(dir, filepath.FromSlash(name)))
-		}, nil)
-	}
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return nil, err
-	}
-	return recipe.Parse(data, nil)
-}
-
-func lint() int {
-	if _, err := load(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	fmt.Println("ok")
-	return 0
-}
-
-func resolve() int {
-	r, err := load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	os.Stdout.Write(r.Resolved)
-	return 0
-}
-
-func graph() int {
-	r, err := load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	fmt.Print(r.Graph())
-	return 0
-}
-
-func inspect() int {
-	r, err := load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	type group struct {
-		Name string `json:"name"`
-		// Run is false for a group that only copies: it does not depend on
-		// the base image or on earlier phases.
-		Run        bool                `json:"run"`
-		Expects    []string            `json:"expects,omitempty"`
-		Contribute map[string][]string `json:"contribute,omitempty"`
-	}
-	type phase struct {
-		Name   string   `json:"name"`
-		Groups []string `json:"groups"`
-		// Collector phases have items instead of groups.
-		Collect string   `json:"collect,omitempty"`
-		Items   []string `json:"items,omitempty"`
-		Detail  []group  `json:"detail,omitempty"`
-	}
-	out := struct {
-		Name        string `json:"name"`
-		Description string `json:"description,omitempty"`
-		Base        string `json:"base"`
-		// Version of this frontend: semver for releases, sha-<commit>
-		// for development builds.
-		Version string `json:"version"`
-		// The secrets the recipe mounts: id → required by a step.
-		Secrets map[string]bool `json:"secrets,omitempty"`
-		// "off", "base" (the base image's creation time) or the seconds.
-		SourceDateEpoch string   `json:"source_date_epoch"`
-		Record          bool     `json:"record"`
-		Volatile        []string `json:"volatile"`
-		Phases          []phase  `json:"phases"`
-	}{
-		Name: r.Settings.Name, Description: r.Settings.Description, Base: r.Settings.Base,
-		Version: frontend.Version, Secrets: r.SecretIDs(),
-		SourceDateEpoch: "base", Record: r.Settings.Record, Volatile: r.Settings.Volatile,
-	}
-	switch {
-	case r.Settings.EpochOff:
-		out.SourceDateEpoch = "off"
-	case r.Settings.SourceDateEpoch != nil:
-		out.SourceDateEpoch = strconv.FormatInt(*r.Settings.SourceDateEpoch, 10)
-	}
-	for _, p := range r.Phases {
-		ph := phase{Name: p.Name, Groups: p.GroupNames(), Items: p.Items}
-		if p.IsCollector() {
-			ph.Collect = p.Collect.Raw()
-		}
-		for _, g := range ph.Groups {
-			grp := p.Groups[g]
-			ph.Detail = append(ph.Detail, group{Name: g, Run: grp.HasRun(), Expects: grp.Expects, Contribute: grp.Contribute})
-		}
-		out.Phases = append(out.Phases, ph)
-	}
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	if err := enc.Encode(out); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	return 0
 }

@@ -4,10 +4,10 @@
 #
 # Every feature is a file of its own, imported below and merged into this
 # recipe; each adds a group to the phase features. A group names the packages
-# and services it needs; the collector phases install and enable them in
-# one step each. The groups themselves only copy files, so they do not see
-# the state before them: a new base image rebuilds the two collectors, not
-# the features.
+# and services it needs; the collectors install and enable them in one step
+# each. The groups themselves only copy files, so they do not see the state
+# before them: a new base image rebuilds the two collectors, not the
+# features.
 #
 # The package set comes from the base image: its mirrorlist points to the
 # Arch Linux Archive snapshot that belongs to the tag.
@@ -17,22 +17,26 @@ imports:
   - features/network.yml
 
 settings:
-  name: mysystem
-  description: Example system with kmscon, NetworkManager and AppArmor
   base: ghcr.io/nomira-os/arch-base:2026.11.13
   labels:
+    org.opencontainers.image.description: Example system with kmscon and NetworkManager
     org.opencontainers.image.source: https://github.com/Nomira-OS/nomira
   env:
     LANG: C.UTF-8
+  # Every run gets these mounts: downloads are kept between builds, logs
+  # and temporary files never reach the image.
+  mounts:
+    /var/cache/pacman/pkg: type=cache,sharing=locked
+    /var/log: type=tmpfs
+    /tmp: type=tmpfs
 
 build:
   packages:
-    collect: run --mount=type=cache,target=/var/cache/pacman/pkg pacman -S --needed --noconfirm ${items}
+    collect: run pacman -S --needed --noconfirm ${items}
 
   features:
-    groups:
-      boot:
-        - copy files/kargs/ /usr/lib/bootc/kargs.d/
+    boot:
+      - copy files/kargs/ /usr/lib/bootc/kargs.d/
 
   services:
     collect: run systemctl enable ${items}

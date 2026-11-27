@@ -2,6 +2,7 @@ package compile
 
 import (
 	_ "embed"
+	"strings"
 
 	"github.com/moby/buildkit/client/llb"
 )
@@ -17,13 +18,13 @@ const WritesPath = "/nomira/out/writes"
 //go:embed lister.sh
 var listerScript string
 
-// WriteSetState builds the lister exec for one group. Solve it with
-// Evaluate and ReadFile WritesPath to obtain the group's write set.
+// WriteSetState builds the lister exec for one group (pass 1 of the
+// conflict check, see package conflict). Solve it with Evaluate and
+// ReadFile WritesPath to obtain the group's write set.
 //
-// layer is what the group adds: everything in it is a write, and only
-// those files are hashed. lower and upper are the trees before and after
-// the group; they are only walked, never read, to find what the group
-// deleted. Both are nil for a group that was built on an empty state: it
+// layer is what the group adds: everything in it is a write. lower and
+// upper are the trees before and after the group; they are walked to find
+// what the group deleted. No file is read. Both are nil for a group that was built on an empty state: it
 // cannot delete anything.
 //
 // phase is the phase's tag (PhaseTag). The mounts get no content-based
@@ -42,6 +43,29 @@ func WriteSetState(toolbox string, lower, upper *llb.State, layer llb.State, pha
 			llb.AddMount("/nomira/u", *upper, llb.Readonly, noContentCache))
 	}
 	return toolboxState(toolbox).Run(opts...).Root()
+}
+
+// HashesPath is where the hash script leaves its output.
+const HashesPath = "/nomira/out/hashes"
+
+// hashScript (see hash.sh) hashes the given paths of a group's layer.
+//
+//go:embed hash.sh
+var hashScript string
+
+// HashState builds pass 2 of the conflict check for one group: it hashes
+// the paths of layer that other groups of the phase write too. Solve it
+// with Evaluate and ReadFile HashesPath.
+func HashState(toolbox string, layer llb.State, paths []string, phase, group string) llb.State {
+	list := llb.Scratch().File(llb.Mkfile("/paths", 0o644, []byte(strings.Join(paths, "\n")+"\n")),
+		llb.WithCustomNamef("[check %s/%s] paths written by other groups too", phase, group))
+	return toolboxState(toolbox).Run(
+		llb.Args([]string{"/bin/sh", "-c", hashScript}),
+		llb.Dir("/"),
+		llb.AddMount("/nomira/d", layer, llb.Readonly, noContentCache),
+		llb.AddMount("/nomira/p", list, llb.Readonly),
+		llb.WithCustomNamef("[check %s/%s] hash %d shared paths", phase, group, len(paths)),
+	).Root()
 }
 
 // GuardPath is where the guard script leaves its findings.

@@ -3,9 +3,8 @@
 # packages and services to the collectors of those names.
 build:
   features:
-    groups:
-      network:
-        packages: [networkmanager]
-        services: [NetworkManager.service]
-        commands:
-          - copy --chmod=0600 files/nm/ /etc/NetworkManager/system-connections/
+    network:
+      packages: [networkmanager]
+      services: [NetworkManager.service]
+      commands:
+        - copy --chmod=0600 files/nm/ /etc/NetworkManager/system-connections/

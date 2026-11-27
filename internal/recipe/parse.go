@@ -3,289 +3,476 @@ package recipe
 import (
 	"fmt"
 	"path"
-	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// raw YAML shapes (strict decoding: unknown keys are errors).
-
-type rawRecipe struct {
-	Settings rawSettings         `yaml:"settings"`
-	Stages   map[string]rawStage `yaml:"stages"`
-	Build    yaml.Node           `yaml:"build"`
-}
-
-type rawSettings struct {
-	Name       string            `yaml:"name"`
-	Base       string            `yaml:"base"`
-	Validation string            `yaml:"validation"`
-	Toolbox    string            `yaml:"toolbox"`
-	Args       map[string]string `yaml:"args"`
-
-	Description string            `yaml:"description"`
-	Labels      map[string]string `yaml:"labels"`
-	Env         map[string]string `yaml:"env"`
-
-	SourceDateEpoch rawEpoch  `yaml:"source_date_epoch"`
-	Record          *bool     `yaml:"record"`
-	Volatile        *[]string `yaml:"volatile"`
-}
-
-// rawEpoch is settings.source_date_epoch: seconds since 1970, true for
-// the default, or false.
-type rawEpoch struct {
-	Off   bool
-	Value *int64
-}
-
-func (e *rawEpoch) UnmarshalYAML(n *yaml.Node) error {
-	if n.Kind == yaml.ScalarNode {
-		switch n.Tag {
-		case "!!bool":
-			var on bool
-			if err := n.Decode(&on); err != nil {
-				return err
-			}
-			e.Off = !on
-			return nil
-		case "!!int":
-			var v int64
-			if err := n.Decode(&v); err != nil {
-				return err
-			}
-			e.Value = &v
-			return nil
-		}
-	}
-	return fmt.Errorf("line %d: settings.source_date_epoch: expected seconds since 1970, true or false", n.Line)
-}
-
-type rawStage struct {
-	From     string   `yaml:"from"`
-	Commands []string `yaml:"commands"`
-}
-
-// Parse decodes, schema-validates and arg-expands a recipe. buildArgs are the
-// caller-supplied overrides (from `--opt build-arg:NAME=...`); only args
-// declared in settings.args may be overridden.
-//
-// Parse handles a single self-contained file; use ParseFile for recipes
+// Parse parses a single self-contained recipe; use ParseFile for recipes
 // that use `imports`.
-func Parse(data []byte, buildArgs map[string]string) (*Recipe, error) {
+func Parse(data []byte) (*Recipe, error) {
 	const entry = "recipe.yml"
 	return ParseFile(entry, func(name string) ([]byte, error) {
 		if name == entry {
 			return data, nil
 		}
 		return nil, errf("imports are not available when the recipe is read from a single stream")
-	}, buildArgs)
+	})
 }
 
 // ParseFile parses the recipe at entry, merging its imports, which it
 // reads through read. Import paths are relative to the importing file.
-func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recipe, error) {
+func ParseFile(entry string, read ReadFunc) (*Recipe, error) {
 	entry = path.Clean(entry)
 	doc, err := loadDocument(entry, read)
 	if err != nil {
-		return nil, errf("recipe: %w", err)
-	}
-	if err := checkRemoved(doc.root); err != nil {
 		return nil, err
 	}
-	var raw rawRecipe
-	if err := decodeStrict(doc.root, &raw); err != nil {
-		return nil, errf("recipe: %w", err)
-	}
-
-	// Effective args: declared defaults, overridden by build args.
-	args := map[string]string{}
-	for k, v := range raw.Settings.Args {
-		args[k] = v
-	}
-	for k, v := range buildArgs {
-		if _, declared := args[k]; !declared {
-			return nil, errf("recipe: build-arg %q is not declared in settings.args", k)
-		}
-		args[k] = v
-	}
-
-	setArgs(doc.root, buildArgs)
-	resolved, err := doc.resolved(entry)
+	d := &decoder{doc: doc}
+	r, err := d.recipe()
 	if err != nil {
-		return nil, errf("recipe: %w", err)
-	}
-
-	r := &Recipe{
-		Files:    doc.files,
-		Resolved: resolved,
-		Settings: Settings{
-			Name:       raw.Settings.Name,
-			Base:       ExpandArgs(raw.Settings.Base, args),
-			Validation: raw.Settings.Validation,
-			Toolbox:    raw.Settings.Toolbox,
-			Args:       args,
-
-			Description: ExpandArgs(raw.Settings.Description, args),
-			Labels:      expandMap(raw.Settings.Labels, args),
-			Env:         expandMap(raw.Settings.Env, args),
-
-			SourceDateEpoch: raw.Settings.SourceDateEpoch.Value,
-			EpochOff:        raw.Settings.SourceDateEpoch.Off,
-			Record:          raw.Settings.Record == nil || *raw.Settings.Record,
-			Volatile:        DefaultVolatile,
-		},
-		Stages: map[string]Stage{},
-	}
-	if err := checkEnvNames("settings.env", r.Settings.Env); err != nil {
 		return nil, err
 	}
-	if _, ok := r.Settings.Env[EpochVar]; ok {
-		return nil, errf("recipe: settings.env: set %s with settings.source_date_epoch", EpochVar)
+	if r.Resolved, err = doc.resolved(entry); err != nil {
+		return nil, err
 	}
-	if e := r.Settings.SourceDateEpoch; e != nil && *e < 0 {
-		return nil, errf("recipe: settings.source_date_epoch: %d is before 1970", *e)
+	r.Files = doc.files
+	return r, nil
+}
+
+// EpochVar is the variable every run sees with settings.source_date_epoch.
+const EpochVar = "SOURCE_DATE_EPOCH"
+
+const (
+	itemsRef   = "${items}"
+	keyCollect = "collect"
+	keyEnv     = "env"
+)
+
+// removed are keys older recipes had, with where they went. A frontend
+// cannot set client options, so a recipe does not either; other keys gave
+// way to simpler ones.
+var removed = map[string]map[string]string{
+	"top": {
+		"phases":  "phases are the keys of build: build: {packages: {collect: …}, features: {…}}",
+		"prepare": "renamed to stages",
+	},
+	"settings": {
+		"compression": "the layer compression is a client option: nomira build --compression, or compression = … in nomira.conf",
+		"secrets":     "where a secret comes from is a client option: nomira build --secret id=ID,src=FILE, or secret = … in nomira.conf; the recipe only mounts it",
+		"tags":        "image names are a client option",
+		"platforms":   "the platform is a client option; the frontend builds the one BuildKit asks for",
+		"name":        "the image name is a client option: nomira build --name, or name = … in nomira.conf",
+		"description": "set the label org.opencontainers.image.description in settings.labels",
+		"validation":  "identical writes are always allowed, all other overlaps are conflicts",
+		"toolbox":     "the image for the checks is built in; tests set it with the build option toolbox",
+		"args":        "use settings.env, or the env command where a value should rerun only the commands after it",
+		"volatile":    "use settings.mounts, e.g. /var/log: type=tmpfs",
+	},
+	"phase": {
+		"groups":     "groups stand directly under the phase now",
+		"validation": "identical writes are always allowed, all other overlaps are conflicts",
+		"shared":     "identical writes are always allowed, all other overlaps are conflicts",
+	},
+	"group": {
+		"stages":  "stages are only at the top of the recipe; an imported file can add its own",
+		"include": "use imports at the top of the recipe",
+	},
+}
+
+// decoder turns the merged document into a Recipe, with the file and line
+// of the offending key in every error.
+type decoder struct {
+	doc *document
+}
+
+// at names where key k was written: file:line.
+func (d *decoder) at(k *yaml.Node) string {
+	from := d.doc.from[k]
+	if len(from) == 0 {
+		return fmt.Sprintf("line %d", k.Line)
 	}
-	if v := raw.Settings.Volatile; v != nil {
-		r.Settings.Volatile = nil
-		for _, p := range *v {
-			if !strings.HasPrefix(p, "/") || p == "/" || path.Clean(p) != strings.TrimSuffix(p, "/") {
-				return nil, errf("recipe: settings.volatile: %q is not a clean absolute path below /", p)
-			}
-			r.Settings.Volatile = append(r.Settings.Volatile, path.Clean(p))
+	return fmt.Sprintf("%s:%d", from[len(from)-1], k.Line)
+}
+
+// keys checks the keys of mapping n against known ones; removed ones get
+// their hint. where names n in messages, key the node that holds n.
+func (d *decoder) keys(n, key *yaml.Node, where, kind string, known ...string) error {
+	if n.Kind != yaml.MappingNode {
+		return errf("%s: %s: expected a mapping", d.at(key), where)
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := n.Content[i]
+		if why, ok := removed[kind][k.Value]; ok {
+			return errf("%s: %s.%s is gone: %s", d.at(k), where, k.Value, why)
 		}
+		if known != nil && !contains(known, k.Value) {
+			return errf("%s: %s: unknown key %q (known: %s)", d.at(k), where, k.Value, strings.Join(known, ", "))
+		}
+	}
+	return nil
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// decode decodes v (the value of key k) into out, naming the key on error.
+func (d *decoder) decode(k, v *yaml.Node, where string, out any) error {
+	if err := v.Decode(out); err != nil {
+		msg := err.Error()
+		if te, ok := err.(*yaml.TypeError); ok {
+			msg = strings.Join(te.Errors, "; ")
+		}
+		return errf("%s: %s: %s", d.at(k), where, msg)
+	}
+	return nil
+}
+
+// pairs iterates over a mapping.
+func pairs(n *yaml.Node, fn func(k, v *yaml.Node) error) error {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if err := fn(n.Content[i], n.Content[i+1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *decoder) recipe() (*Recipe, error) {
+	root := d.doc.root
+	rootKey := &yaml.Node{Line: 1}
+	d.doc.from[rootKey] = []string{d.doc.files[0]}
+	if err := d.keys(root, rootKey, "recipe", "top", "settings", "stages", "build"); err != nil {
+		return nil, err
+	}
+	r := &Recipe{Stages: map[string]Stage{}}
+	var buildKey, buildNode *yaml.Node
+	err := pairs(root, func(k, v *yaml.Node) error {
+		switch k.Value {
+		case "settings":
+			return d.settings(k, v, &r.Settings)
+		case "stages":
+			return d.stages(k, v, r)
+		case "build":
+			buildKey, buildNode = k, v
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	if r.Settings.Base == "" {
-		return nil, errf("recipe: settings.base is required")
+		return nil, errf("settings.base is required")
 	}
-	if !validPolicy(r.Settings.Validation) {
-		return nil, errf("recipe: settings.validation %q invalid (strict|allow-identical)", r.Settings.Validation)
+	if buildNode == nil || len(buildNode.Content) == 0 {
+		return nil, errf("build must not be empty")
 	}
-	if r.Settings.Toolbox == "" {
-		r.Settings.Toolbox = DefaultToolbox
+	if err := d.build(buildKey, buildNode, r); err != nil {
+		return nil, err
 	}
+	return r, nil
+}
 
-	if _, ok := args[itemsVar]; ok {
-		return nil, errf("recipe: settings.args: %q is reserved for collector phases", itemsVar)
+func (d *decoder) settings(key, n *yaml.Node, s *Settings) error {
+	if err := d.keys(n, key, "settings", "settings", "base", "labels", "env", "mounts", "source_date_epoch", "record"); err != nil {
+		return err
 	}
-
-	// Stages.
-	for name, rs := range raw.Stages {
-		if name == "context" || strings.Contains(name, "/") {
-			return nil, errf("recipe: stage name %q is not allowed", name)
+	s.Record = true
+	return pairs(n, func(k, v *yaml.Node) error {
+		where := "settings." + k.Value
+		switch k.Value {
+		case "base":
+			return d.decode(k, v, where, &s.Base)
+		case "labels":
+			return d.decode(k, v, where, &s.Labels)
+		case "env":
+			if err := d.decode(k, v, where, &s.Env); err != nil {
+				return err
+			}
+			if err := checkEnvNames(s.Env); err != nil {
+				return errf("%s: %s: %w", d.at(k), where, err)
+			}
+			if _, ok := s.Env[EpochVar]; ok {
+				return errf("%s: %s: set %s with settings.source_date_epoch", d.at(k), where, EpochVar)
+			}
+			return nil
+		case "mounts":
+			return d.mounts(k, v, s)
+		case "source_date_epoch":
+			switch {
+			case v.Tag == "!!bool":
+				var on bool
+				if err := v.Decode(&on); err != nil {
+					return err
+				}
+				s.EpochOff = !on
+			case v.Tag == "!!int":
+				var e int64
+				if err := v.Decode(&e); err != nil {
+					return err
+				}
+				if e < 0 {
+					return errf("%s: %s: %d is before 1970", d.at(k), where, e)
+				}
+				s.SourceDateEpoch = &e
+			default:
+				return errf("%s: %s: expected seconds since 1970, true or false", d.at(k), where)
+			}
+		case "record":
+			return d.decode(k, v, where, &s.Record)
 		}
-		st, err := buildStage(rs, args)
+		return nil
+	})
+}
+
+// mounts decodes settings.mounts: target → the options of --mount.
+func (d *decoder) mounts(key, n *yaml.Node, s *Settings) error {
+	if n.Kind != yaml.MappingNode {
+		return errf("%s: settings.mounts: expected a mapping of target: options", d.at(key))
+	}
+	return pairs(n, func(k, v *yaml.Node) error {
+		where := "settings.mounts." + k.Value
+		var spec string
+		if err := d.decode(k, v, where, &spec); err != nil {
+			return err
+		}
+		target := k.Value
+		if strings.Contains(spec, "target=") {
+			return errf("%s: %s: the target is the key", d.at(k), where)
+		}
+		if !strings.HasPrefix(target, "/") || target == "/" || path.Clean(target) != target {
+			return errf("%s: %s: the key must be a clean absolute path below /", d.at(k), where)
+		}
+		m, err := parseMount(spec + ",target=" + target)
 		if err != nil {
-			return nil, errf("recipe: stages.%s: %w", name, err)
+			return errf("%s: %s: %w", d.at(k), where, err)
 		}
-		r.Stages[name] = st
+		if m.Type != "cache" && m.Type != "tmpfs" {
+			return errf("%s: %s: only type=cache and type=tmpfs apply to every run", d.at(k), where)
+		}
+		s.Mounts = append(s.Mounts, m)
+		return nil
+	})
+}
+
+func (d *decoder) stages(key, n *yaml.Node, r *Recipe) error {
+	if err := d.keys(n, key, "stages", "", nil...); err != nil {
+		return err
+	}
+	return pairs(n, func(k, v *yaml.Node) error {
+		where := "stages." + k.Value
+		if k.Value == "context" || strings.Contains(k.Value, "/") {
+			return errf("%s: stage name %q is not allowed", d.at(k), k.Value)
+		}
+		if err := d.keys(v, k, where, "", "from", "commands"); err != nil {
+			return err
+		}
+		var raw struct {
+			From     string   `yaml:"from"`
+			Commands []string `yaml:"commands"`
+		}
+		if err := d.decode(k, v, where, &raw); err != nil {
+			return err
+		}
+		if raw.From == "" {
+			return errf("%s: %s: from is required", d.at(k), where)
+		}
+		if len(raw.Commands) == 0 {
+			return errf("%s: %s: commands must not be empty", d.at(k), where)
+		}
+		st := Stage{From: raw.From}
+		for i, line := range raw.Commands {
+			cmd, err := ParseCommand(line)
+			if err != nil {
+				return errf("%s: %s: command %d: %w", d.at(k), where, i+1, err)
+			}
+			switch c := cmd.(type) {
+			case CopyCmd:
+				if c.From != "" {
+					return errf("%s: %s: copy --from is not supported in stages", d.at(k), where)
+				}
+			case RunCmd:
+				for _, m := range c.Mounts {
+					if m.Type == "bind" {
+						return errf("%s: %s: --mount=type=bind is not supported in stages", d.at(k), where)
+					}
+				}
+			}
+			st.Commands = append(st.Commands, cmd)
+		}
+		r.Stages[k.Value] = st
+		return nil
+	})
+}
+
+// rawGroup is a group before its commands are parsed.
+type rawGroup struct {
+	key        *yaml.Node
+	commands   []string
+	expects    []string
+	contribute map[string][]string
+	collect    string
+}
+
+// build decodes the phases. A phase is a mapping of groups, with env as
+// the one key of its own; or, with collect, a single collector named
+// after the phase.
+func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
+	if err := d.keys(n, key, "build", "", nil...); err != nil {
+		return err
+	}
+	type rawPhase struct {
+		key    *yaml.Node
+		env    map[string]string
+		groups map[string]*rawGroup
+		order  []string
+	}
+	var phases []rawPhase
+	collectors := map[string]*yaml.Node{} // collector name → where it is defined
+	err := pairs(n, func(k, v *yaml.Node) error {
+		where := "build." + k.Value
+		if k.Value == "" || strings.Contains(k.Value, "/") {
+			return errf("%s: phase name %q is not allowed", d.at(k), k.Value)
+		}
+		if _, ok := r.Stages[k.Value]; ok {
+			return errf("%s: %q is both a stage and a phase", d.at(k), k.Value)
+		}
+		if v.Kind == 0 || isNull(v) {
+			v = &yaml.Node{Kind: yaml.MappingNode}
+		}
+		if err := d.keys(v, k, where, "phase", nil...); err != nil {
+			return err
+		}
+		rp := rawPhase{key: k, groups: map[string]*rawGroup{}}
+		if indexOf(v, keyCollect) >= 0 {
+			// A phase that is one collector, named after the phase.
+			if err := d.keys(v, k, where, "phase", keyCollect, keyEnv); err != nil {
+				return err
+			}
+			g := &rawGroup{key: k}
+			err := pairs(v, func(ck, cv *yaml.Node) error {
+				if ck.Value == keyEnv {
+					return d.decode(ck, cv, where+".env", &rp.env)
+				}
+				return d.decode(ck, cv, where+".collect", &g.collect)
+			})
+			if err != nil {
+				return err
+			}
+			if prev, ok := collectors[k.Value]; ok {
+				return errf("%s: a collector %q is already defined at %s", d.at(k), k.Value, d.at(prev))
+			}
+			collectors[k.Value] = k
+			rp.groups[k.Value] = g
+			rp.order = append(rp.order, k.Value)
+			phases = append(phases, rp)
+			return nil
+		}
+		err := pairs(v, func(gk, gv *yaml.Node) error {
+			if gk.Value == keyEnv {
+				return d.decode(gk, gv, where+".env", &rp.env)
+			}
+			g, err := d.group(gk, gv, where+"."+gk.Value)
+			if err != nil {
+				return err
+			}
+			if g.collect != "" {
+				if prev, ok := collectors[gk.Value]; ok {
+					return errf("%s: a collector %q is already defined at %s", d.at(gk), gk.Value, d.at(prev))
+				}
+				collectors[gk.Value] = gk
+			}
+			rp.groups[gk.Value] = g
+			rp.order = append(rp.order, gk.Value)
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if len(rp.order) == 0 {
+			return errf("%s: %s: a phase needs groups or collect", d.at(k), where)
+		}
+		phases = append(phases, rp)
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
-	// Phases.
-	phases, err := phaseList(&raw.Build)
-	if err != nil {
-		return nil, errf("recipe: %w", err)
-	}
-	if len(phases) == 0 {
-		return nil, errf("recipe: build must not be empty")
-	}
-	seenPhase := map[string]bool{}
-	collectors := map[string]bool{}
+	// Commands, contributions, then the collectors' items.
+	items := map[string]map[string]bool{}
+	earlier := map[string]bool{}
 	for _, rp := range phases {
-		if rp.Name == "" || strings.Contains(rp.Name, "/") {
-			return nil, errf("recipe: phase name %q is not allowed", rp.Name)
+		if err := checkEnvNames(rp.env); err != nil {
+			return errf("%s: build.%s.env: %w", d.at(rp.key), rp.key.Value, err)
 		}
-		seenPhase[rp.Name] = true
-		if rp.Collect != "" {
-			collectors[rp.Name] = true
-		}
-	}
-	for name := range raw.Stages {
-		if seenPhase[name] {
-			return nil, errf("recipe: %q is both a stage and a phase", name)
-		}
-	}
-	items := map[string]map[string]bool{} // collector -> set of items
-	earlier := map[string]bool{}          // phases before the current one
-	for _, rp := range phases {
-		ph := Phase{
-			Name:       rp.Name,
-			Validation: rp.Validation,
-			Shared:     rp.Shared,
-			Env:        expandMap(rp.Env, args),
-			Groups:     map[string]Group{},
-		}
-		if err := checkEnvNames(fmt.Sprintf("phase %q: env", rp.Name), ph.Env); err != nil {
-			return nil, err
-		}
-		if rp.Collect != "" {
-			if len(rp.Groups) > 0 || rp.Validation != "" || len(rp.Shared) > 0 {
-				return nil, errf("recipe: phase %q: collect cannot be combined with groups, validation or shared", rp.Name)
+		ph := Phase{Name: rp.key.Value, Env: rp.env, Groups: map[string]Group{}}
+		resolve := func(name string) (string, error) {
+			if _, ok := r.Stages[name]; ok || earlier[name] {
+				return name, nil
 			}
-			if ReservedGroupKey(rp.Name) {
-				return nil, errf("recipe: phase %q: a collector cannot use this name, it has a fixed meaning in groups", rp.Name)
-			}
-			if !strings.Contains(rp.Collect, itemsRef) {
-				return nil, errf("recipe: phase %q: collect must contain %s", rp.Name, itemsRef)
-			}
-			r.Phases = append(r.Phases, ph)
-			earlier[rp.Name] = true
-			continue
-		}
-		if !validPolicy(rp.Validation) {
-			return nil, errf("recipe: phase %q: validation %q invalid (strict|allow-identical)", rp.Name, rp.Validation)
-		}
-		if len(rp.Groups) == 0 {
-			return nil, errf("recipe: phase %q: needs groups or collect", rp.Name)
-		}
-		for gname, fg := range rp.Groups {
-			where := fmt.Sprintf("recipe: phase %q: group %q", rp.Name, gname)
-			if len(fg.Commands) == 0 && len(fg.Contribute) == 0 {
-				return nil, errf("%s: needs commands or a contribution to a collector", where)
-			}
-			// Stages of the group. Their names are local to it.
-			local := map[string]string{}
-			for sname, fs := range fg.Stages {
-				if sname == "context" || strings.Contains(sname, "/") {
-					return nil, errf("%s: stage name %q is not allowed", where, sname)
+			for _, p := range phases {
+				if p.key.Value == name {
+					return "", errf("from=%s: a phase can only use phases that come before it", name)
 				}
-				st, err := buildStage(fs, args)
-				if err != nil {
-					return nil, errf("%s: stages.%s: %w", where, sname, err)
-				}
-				qual := rp.Name + "/" + gname + "/" + sname
-				local[sname] = qual
-				r.Stages[qual] = st
+			}
+			return "", errf("from=%s: no stage or phase of that name", name)
+		}
+		for _, gname := range rp.order {
+			rg := rp.groups[gname]
+			where := fmt.Sprintf("%s: build.%s.%s", d.at(rg.key), ph.Name, gname)
+			if gname == ph.Name && rg.collect != "" {
+				where = fmt.Sprintf("%s: build.%s", d.at(rg.key), ph.Name)
 			}
 			grp := Group{}
-			for i, line := range fg.Commands {
-				cmd, err := ParseCommand(ExpandArgs(line, args))
-				if err != nil {
-					return nil, errf("%s: command %d: %w", where, i+1, err)
+			if rg.collect != "" {
+				if !strings.Contains(rg.collect, itemsRef) {
+					return errf("%s: collect must contain %s", where, itemsRef)
 				}
-				resolve := func(name string) (string, error) {
-					return resolveFrom(name, local, raw.Stages, earlier, seenPhase)
+				cmd, err := ParseCommand(rg.collect)
+				if err != nil {
+					return errf("%s: collect: %w", where, err)
+				}
+				run, ok := cmd.(RunCmd)
+				if !ok {
+					return errf("%s: collect must be a run command", where)
+				}
+				resolved, err := resolveSources(run, resolve)
+				if err != nil {
+					return errf("%s: collect: %w", where, err)
+				}
+				run = resolved.(RunCmd)
+				grp.Collect = &run
+			}
+			for i, line := range rg.commands {
+				cmd, err := ParseCommand(line)
+				if err != nil {
+					return errf("%s: command %d: %w", where, i+1, err)
 				}
 				if cmd, err = resolveSources(cmd, resolve); err != nil {
-					return nil, errf("%s: command %d: %w", where, i+1, err)
+					return errf("%s: command %d: %w", where, i+1, err)
 				}
 				grp.Commands = append(grp.Commands, cmd)
 			}
-			for _, e := range fg.Expects {
+			for _, e := range rg.expects {
 				if !strings.HasPrefix(e, "/") || path.Clean(e) != strings.TrimSuffix(e, "/") && e != "/" {
-					return nil, errf("%s: expects: %q is not a clean absolute path", where, e)
+					return errf("%s: expects: %q is not a clean absolute path", where, e)
 				}
 				grp.Expects = append(grp.Expects, path.Clean(e))
 			}
-			for cname, list := range fg.Contribute {
-				if !collectors[cname] {
-					return nil, errf("%s: unknown key %q: no collector phase of that name (collectors: %s)", where, cname, strings.Join(sortedKeys(collectors), ", "))
+			for cname, list := range rg.contribute {
+				if collectors[cname] == nil {
+					return errf("%s: unknown key %q: no collector of that name (collectors: %s)", where, cname, collectorNames(collectors))
 				}
 				for _, it := range list {
-					it = ExpandArgs(it, args)
 					if !validItem(it) {
-						return nil, errf("%s: %s: %q is not a valid item (letters, digits and @%%+=:,./_- only, not starting with -)", where, cname, it)
+						return errf("%s: %s: %q is not a valid item (letters, digits and @%%+=:,./_- only, not starting with -)", where, cname, it)
 					}
 					if items[cname] == nil {
 						items[cname] = map[string]bool{}
@@ -300,156 +487,85 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			ph.Groups[gname] = grp
 		}
 		r.Phases = append(r.Phases, ph)
-		earlier[rp.Name] = true
+		earlier[ph.Name] = true
 	}
+	// The items are sorted and unique, so that the command, and with it
+	// the cache key, does not depend on the order of groups or files.
+	for pi := range r.Phases {
+		for gname, grp := range r.Phases[pi].Groups {
+			if grp.Collect == nil {
+				continue
+			}
+			list := sortedKeys(items[gname])
+			grp.Items = list
+			if len(list) > 0 {
+				run := *grp.Collect
+				run.Script = strings.ReplaceAll(run.Script, itemsRef, strings.Join(list, " "))
+				run.raw = strings.ReplaceAll(run.raw, itemsRef, strings.Join(list, " "))
+				grp.Commands = []Command{run}
+			}
+			r.Phases[pi].Groups[gname] = grp
+		}
+	}
+	return nil
+}
 
-	// Collectors: fill in what the groups contributed. The items are sorted
-	// and unique so that the command, and with it the cache key, does not
-	// depend on the order of groups or files.
-	for i, rp := range phases {
-		if rp.Collect == "" {
-			continue
-		}
-		list := sortedKeys(items[rp.Name])
-		line := strings.ReplaceAll(rp.Collect, itemsRef, strings.Join(list, " "))
-		cmd, err := ParseCommand(ExpandArgs(line, args))
-		if err != nil {
-			return nil, errf("recipe: phase %q: collect: %w", rp.Name, err)
-		}
-		run, ok := cmd.(RunCmd)
-		if !ok {
-			return nil, errf("recipe: phase %q: collect must be a run command", rp.Name)
-		}
-		before := map[string]bool{}
-		for _, p := range phases[:i] {
-			before[p.Name] = true
-		}
-		resolved, err := resolveSources(run, func(name string) (string, error) {
-			return resolveFrom(name, nil, raw.Stages, before, seenPhase)
-		})
-		if err != nil {
-			return nil, errf("recipe: phase %q: collect: %w", rp.Name, err)
-		}
-		run = resolved.(RunCmd)
-		r.Phases[i].Collect = &run
-		r.Phases[i].Items = list
+func collectorNames(m map[string]*yaml.Node) string {
+	set := map[string]bool{}
+	for k := range m {
+		set[k] = true
 	}
-	if err := linkStagesToPhases(r); err != nil {
+	if len(set) == 0 {
+		return "none"
+	}
+	return joinSorted(set)
+}
+
+// group decodes one group: a list of commands, or a mapping with
+// commands, expects, collect and contributions.
+func (d *decoder) group(k, v *yaml.Node, where string) (*rawGroup, error) {
+	g := &rawGroup{key: k}
+	switch v.Kind {
+	case yaml.SequenceNode:
+		return g, d.decode(k, v, where, &g.commands)
+	case yaml.MappingNode:
+	default:
+		return nil, errf("%s: %s: expected a list of commands or a group mapping", d.at(k), where)
+	}
+	if err := d.keys(v, k, where, "group", nil...); err != nil {
 		return nil, err
 	}
-	return r, nil
-}
-
-// EpochVar is the variable every run sees with settings.source_date_epoch.
-const EpochVar = "SOURCE_DATE_EPOCH"
-
-// removedSettings are settings that older recipes had and that are
-// options of the BuildKit client now: a frontend cannot set them, so the
-// recipe does not either. The error says where they went.
-var removedSettings = map[string]string{
-	"compression": "the layer compression is a client option: nomira build --compression, or compression = … in nomira.conf",
-	"secrets":     "where a secret comes from is a client option: nomira build --secret id=ID,src=FILE, or secret = … in nomira.conf; the recipe only mounts it",
-	"tags":        "image names are a client option",
-	"platforms":   "the platform is a client option; the frontend builds the one BuildKit asks for",
-}
-
-func checkRemoved(root *yaml.Node) error {
-	si := indexOf(root, "settings")
-	if si < 0 || root.Content[si+1].Kind != yaml.MappingNode {
+	err := pairs(v, func(gk, gv *yaml.Node) error {
+		switch gk.Value {
+		case "commands":
+			return d.decode(gk, gv, where+".commands", &g.commands)
+		case "expects":
+			return d.decode(gk, gv, where+".expects", &g.expects)
+		case keyCollect:
+			return d.decode(gk, gv, where+".collect", &g.collect)
+		case keyEnv:
+			return errf("%s: %s: env is a key of the phase; in a group use the env command", d.at(gk), where)
+		}
+		var list []string
+		if err := gv.Decode(&list); err != nil {
+			return errf("%s: %s.%s: a contribution must be a list of strings", d.at(gk), where, gk.Value)
+		}
+		if g.contribute == nil {
+			g.contribute = map[string][]string{}
+		}
+		g.contribute[gk.Value] = list
 		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	m := root.Content[si+1]
-	for i := 0; i+1 < len(m.Content); i += 2 {
-		if why, ok := removedSettings[m.Content[i].Value]; ok {
-			return errf("recipe: settings.%s is gone: %s", m.Content[i].Value, why)
-		}
+	if g.collect != "" && (len(g.commands) > 0 || len(g.expects) > 0 || len(g.contribute) > 0) {
+		return nil, errf("%s: %s: a collector has collect and nothing else", d.at(k), where)
 	}
-	return nil
-}
-
-// linkStagesToPhases marks the prepare stages that start from a phase and
-// checks that only later phases use them.
-func linkStagesToPhases(r *Recipe) error {
-	index := map[string]int{}
-	for i, ph := range r.Phases {
-		index[ph.Name] = i
+	if g.collect == "" && len(g.commands) == 0 && len(g.contribute) == 0 {
+		return nil, errf("%s: %s: needs commands, collect or a contribution to a collector", d.at(k), where)
 	}
-	for name, st := range r.Stages {
-		if _, ok := index[st.From]; ok {
-			st.FromPhase = st.From
-			r.Stages[name] = st
-		}
-	}
-	check := func(i int, from string) error {
-		st, ok := r.Stages[from]
-		if !ok || st.FromPhase == "" {
-			return nil
-		}
-		if index[st.FromPhase] >= i {
-			return errf("recipe: phase %q uses prepare stage %q, which starts from phase %q; only later phases can use it", r.Phases[i].Name, from, st.FromPhase)
-		}
-		return nil
-	}
-	for i, ph := range r.Phases {
-		var cmds []Command
-		if ph.Collect != nil {
-			cmds = append(cmds, *ph.Collect)
-		}
-		for _, g := range ph.Groups {
-			cmds = append(cmds, g.Commands...)
-		}
-		for _, c := range cmds {
-			switch c := c.(type) {
-			case CopyCmd:
-				if err := check(i, c.From); err != nil {
-					return err
-				}
-			case RunCmd:
-				for _, m := range c.Mounts {
-					if m.Type == "bind" {
-						if err := check(i, m.From); err != nil {
-							return err
-						}
-					}
-				}
-			}
-		}
-	}
-	return nil
-}
-
-const (
-	itemsVar = "items"
-	itemsRef = "${items}"
-)
-
-// buildStage parses the commands of a stage.
-func buildStage(fs rawStage, args map[string]string) (Stage, error) {
-	if fs.From == "" {
-		return Stage{}, errf("from is required")
-	}
-	if len(fs.Commands) == 0 {
-		return Stage{}, errf("commands must not be empty")
-	}
-	st := Stage{From: ExpandArgs(fs.From, args)}
-	for i, line := range fs.Commands {
-		cmd, err := ParseCommand(ExpandArgs(line, args))
-		if err != nil {
-			return Stage{}, errf("command %d: %w", i+1, err)
-		}
-		if cc, ok := cmd.(CopyCmd); ok && cc.From != "" {
-			return Stage{}, errf("copy --from inside prepare stages is not supported yet")
-		}
-		if rc, ok := cmd.(RunCmd); ok {
-			for _, m := range rc.Mounts {
-				if m.Type == "bind" {
-					return Stage{}, errf("--mount=type=bind inside prepare stages is not supported yet")
-				}
-			}
-		}
-		st.Commands = append(st.Commands, cmd)
-	}
-	return st, nil
+	return g, nil
 }
 
 // validItem reports whether s can be placed into a collector command as a
@@ -469,136 +585,16 @@ func validItem(s string) bool {
 	return true
 }
 
-func sortedKeys(m map[string]bool) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// Graph renders the pipeline as a Mermaid flowchart (for `nomira graph` /
-// the frontend's graph mode).
-func (r *Recipe) Graph() string {
-	var b strings.Builder
-	b.WriteString("flowchart TD\n")
-	b.WriteString(fmt.Sprintf("    base[\"base: %s\"]\n", r.Settings.Base))
-	stages := make([]string, 0, len(r.Stages))
-	for name := range r.Stages {
-		stages = append(stages, name)
-	}
-	sort.Strings(stages)
-	for _, name := range stages {
-		b.WriteString(fmt.Sprintf("    prep_%s[\"prepare %s (from %s)\"]\n", graphID(name), name, r.Stages[name].From))
-	}
-	prev := "base"
-	for _, ph := range r.Phases {
-		if ph.IsCollector() {
-			id := "c_" + graphID(ph.Name)
-			b.WriteString(fmt.Sprintf("    %s[/\"collect %s (%d items)\"/]\n    %s --> %s\n", id, ph.Name, len(ph.Items), prev, id))
-			prev = id
-			continue
-		}
-		names := ph.BuildGroupNames()
-		merge := "merge_" + graphID(ph.Name)
-		for _, g := range names {
-			id := fmt.Sprintf("g_%s_%s", graphID(ph.Name), graphID(g))
-			label := fmt.Sprintf("%s / %s", ph.Name, g)
-			if !ph.Groups[g].HasRun() {
-				// No run: the group does not see the state before it.
-				b.WriteString(fmt.Sprintf("    %s([\"%s\"])\n", id, label))
-			} else {
-				b.WriteString(fmt.Sprintf("    %s[\"%s\"]\n    %s --> %s\n", id, label, prev, id))
-			}
-			b.WriteString(fmt.Sprintf("    %s --> %s\n", id, merge))
-		}
-		if len(names) == 0 {
-			continue
-		}
-		b.WriteString(fmt.Sprintf("    %s{{\"merge %s (%s)\"}}\n    %s --> %s\n", merge, ph.Name, ph.Policy(r.Settings.Validation), prev, merge))
-		prev = merge
-	}
-	// Edges that do not follow the order of the phases.
-	for _, ph := range r.Phases {
-		for _, g := range ph.GroupNames() {
-			grp := ph.Groups[g]
-			id := fmt.Sprintf("g_%s_%s", graphID(ph.Name), graphID(g))
-			for _, c := range grp.Commands {
-				if cc, ok := c.(CopyCmd); ok && cc.From != "" {
-					b.WriteString(fmt.Sprintf("    prep_%s -. copy .-> %s\n", graphID(cc.From), id))
-				}
-			}
-			if len(grp.Commands) == 0 {
-				b.WriteString(fmt.Sprintf("    %s([\"%s / %s\"])\n", id, ph.Name, g))
-			}
-			for _, cname := range sortedContrib(grp.Contribute) {
-				b.WriteString(fmt.Sprintf("    %s -. \"%s\" .-> c_%s\n", id, strings.Join(grp.Contribute[cname], " "), graphID(cname)))
-			}
-		}
-	}
-	return b.String()
-}
-
-// graphID turns a name into a Mermaid node id.
-func graphID(s string) string {
-	return strings.Map(func(r rune) rune {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
-			return r
-		}
-		return '_'
-	}, s)
-}
-
-func sortedContrib(m map[string][]string) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
-}
-
-func expandMap(m map[string]string, args map[string]string) map[string]string {
-	if len(m) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = ExpandArgs(v, args)
-	}
-	return out
-}
-
-func checkEnvNames(where string, env map[string]string) error {
+func checkEnvNames(env map[string]string) error {
 	for k := range env {
 		if !validEnvName(k) {
-			return errf("recipe: %s: %q is not a valid variable name", where, k)
+			return errf("%q is not a valid variable name", k)
 		}
 	}
 	return nil
 }
 
-// resolveFrom checks the name in copy --from= or --mount=type=bind,from=
-// and returns what the compiler looks up: a stage local to the group (by
-// its qualified name), a prepare stage, or a phase that comes before.
-func resolveFrom(name string, local map[string]string, stages map[string]rawStage, earlier, phases map[string]bool) (string, error) {
-	if qual, ok := local[name]; ok {
-		return qual, nil
-	}
-	if _, ok := stages[name]; ok {
-		return name, nil
-	}
-	if earlier[name] {
-		return name, nil
-	}
-	if phases[name] {
-		return "", errf("from=%s: a phase can only use phases that come before it", name)
-	}
-	return "", errf("from=%s: no prepare stage or phase of that name", name)
-}
-
-// resolveSources resolves the stage and phase names in a command.
+// resolveSources checks the stage and phase names in a command.
 func resolveSources(cmd Command, resolve func(string) (string, error)) (Command, error) {
 	switch c := cmd.(type) {
 	case CopyCmd:
@@ -627,26 +623,4 @@ func resolveSources(cmd Command, resolve func(string) (string, error)) (Command,
 		return c, nil
 	}
 	return cmd, nil
-}
-
-// setArgs writes build-arg overrides into settings.args of the merged
-// document, so that the resolved recipe builds the same without them.
-func setArgs(root *yaml.Node, buildArgs map[string]string) {
-	if len(buildArgs) == 0 {
-		return
-	}
-	si := indexOf(root, "settings")
-	if si < 0 {
-		return
-	}
-	ai := indexOf(root.Content[si+1], "args")
-	if ai < 0 {
-		return
-	}
-	args := root.Content[si+1].Content[ai+1]
-	for i := 0; i+1 < len(args.Content); i += 2 {
-		if v, ok := buildArgs[args.Content[i].Value]; ok {
-			args.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v, Style: yaml.DoubleQuotedStyle}
-		}
-	}
 }

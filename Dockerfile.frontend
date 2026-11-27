@@ -5,7 +5,7 @@
 # Cross-compiles on the build platform (no QEMU needed for multi-arch).
 FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine@sha256:70bd7ddea8b6cbe5d6943cde279d6b67feb10cc924fb9100d1d8757c1575b280 AS build
 ARG TARGETOS TARGETARCH
-# Release version (semver) or sha-<commit>; inspect and version report it.
+# Release version (semver) or sha-<commit>: the label org.nomira.frontend.version.
 ARG VERSION=dev
 WORKDIR /src
 COPY . .

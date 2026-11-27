@@ -11,7 +11,7 @@
 //     confirms that merging gives the same tree as building on S.
 //
 // A phase with a single group that runs on S skips diff and merge. A
-// collector phase is one run on S with the collected items.
+// collector is a group like any other, with one run: the collected items.
 package compile
 
 import (
@@ -55,7 +55,7 @@ type PhasePlan struct {
 // Build is the compiled pipeline.
 type Build struct {
 	Recipe *recipe.Recipe
-	// Stages maps prepare-stage name → its final state.
+	// Stages maps stage name → its final state.
 	Stages map[string]llb.State
 	// Phases in pipeline order.
 	Phases []PhasePlan
@@ -100,28 +100,20 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	}
 	ctxSrc := llb.Local(LocalContext, ctxOpts...)
 
-	// Prepare stages, global and group-local alike. BuildKit builds a stage
-	// when something copies from it; the order here does not matter.
-	// Stages that start from a phase are built once that phase is done.
-	prepare := func(name string, st recipe.Stage, from llb.State) error {
-		state, err := applyCommands(from, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, "stage "+name, r.Settings.Volatile)
-		if err != nil {
-			return err
-		}
-		b.Stages[name] = state
-		return nil
-	}
+	mounts := r.Settings.Mounts
+
+	// Stages. BuildKit builds a stage when something uses it; the order
+	// here does not matter.
 	for name, st := range r.Stages {
-		if st.FromPhase != "" {
-			continue
-		}
-		if err := prepare(name, st, baseState(st.From, "stage "+name)); err != nil {
+		state, err := applyCommands(baseState(st.From, "stage "+name), st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, "stage "+name, mounts)
+		if err != nil {
 			return nil, err
 		}
+		b.Stages[name] = state
 	}
 
-	// What copy --from= and bind mounts can name: prepare stages, and the
-	// result of every phase once it is done.
+	// What copy --from= and bind mounts can name: stages, and the result of
+	// every phase once it is done.
 	sources := map[string]llb.State{}
 	for name, st := range b.Stages {
 		sources[name] = st
@@ -140,76 +132,65 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		}
 		env := mergeEnv(r.Settings.Env, ph.Env)
 
-		if ph.IsCollector() {
+		names := ph.BuildGroupNames()
+		// Groups without run, built on an empty state.
+		alone := map[string]llb.State{}
+		for _, g := range names {
+			if grp := ph.Groups[g]; !grp.HasRun() {
+				st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, sources, tag+"/"+g, mounts)
+				if err != nil {
+					return nil, err
+				}
+				alone[g] = st
+			}
+		}
+		var rejected map[string]string
+		if hooks.Decide != nil && len(alone) > 0 {
+			var err error
+			if rejected, err = hooks.Decide(ph, cur, alone); err != nil {
+				return nil, err
+			}
+		}
+		for _, g := range names {
+			scope := tag + "/" + g
+			if st, ok := alone[g]; ok {
+				reason, no := rejected[g]
+				if !no {
+					plan.Uppers[g] = st
+					plan.Isolated[g] = true
+					continue
+				}
+				if reason != "" {
+					// Visible in the progress output of every build.
+					scope += ", WARNING: not independent of earlier state: " + reason
+				}
+			}
+			upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, sources, scope, mounts)
+			if err != nil {
+				return nil, err
+			}
+			plan.Uppers[g] = upper
+		}
+		switch {
+		case len(names) == 0:
 			plan.Output = cur
-			if len(ph.Items) > 0 {
-				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, sources, tag, r.Settings.Volatile)
-				if err != nil {
-					return nil, err
-				}
-				plan.Output = out
-			}
-		} else {
-			names := ph.BuildGroupNames()
-			// Groups without run, built on an empty state.
-			alone := map[string]llb.State{}
+		case len(names) == 1 && !plan.Isolated[names[0]]:
+			// Serial case: no diff, no merge, no validation.
+			plan.Output = plan.Uppers[names[0]]
+		default:
+			plan.Validate = len(names) > 1
+			merge := []llb.State{cur}
 			for _, g := range names {
-				if grp := ph.Groups[g]; !grp.HasRun() {
-					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, sources, tag+"/"+g, r.Settings.Volatile)
-					if err != nil {
-						return nil, err
-					}
-					alone[g] = st
+				layer := plan.Uppers[g]
+				if !plan.Isolated[g] {
+					layer = llb.Diff(cur, layer,
+						llb.WithCustomNamef("[%s/%s] diff", tag, g))
 				}
+				plan.Layers[g] = layer
+				merge = append(merge, layer)
 			}
-			var rejected map[string]string
-			if hooks.Decide != nil && len(alone) > 0 {
-				var err error
-				if rejected, err = hooks.Decide(ph, cur, alone); err != nil {
-					return nil, err
-				}
-			}
-			for _, g := range names {
-				scope := tag + "/" + g
-				if st, ok := alone[g]; ok {
-					reason, no := rejected[g]
-					if !no {
-						plan.Uppers[g] = st
-						plan.Isolated[g] = true
-						continue
-					}
-					if reason != "" {
-						// Visible in the progress output of every build.
-						scope += ", WARNING: not independent of earlier state: " + reason
-					}
-				}
-				upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, sources, scope, r.Settings.Volatile)
-				if err != nil {
-					return nil, err
-				}
-				plan.Uppers[g] = upper
-			}
-			switch {
-			case len(names) == 0:
-				plan.Output = cur
-			case len(names) == 1 && !plan.Isolated[names[0]]:
-				// Serial case: no diff, no merge, no validation.
-				plan.Output = plan.Uppers[names[0]]
-			default:
-				plan.Validate = len(names) > 1
-				merge := []llb.State{cur}
-				for _, g := range names {
-					layer := plan.Uppers[g]
-					if !plan.Isolated[g] {
-						layer = llb.Diff(cur, layer,
-							llb.WithCustomNamef("[%s/%s] diff", tag, g))
-					}
-					plan.Layers[g] = layer
-					merge = append(merge, layer)
-				}
-				plan.Output = llb.Merge(merge,
-					llb.WithCustomNamef("[%s] merge %d groups", tag, len(names)))
-			}
+			plan.Output = llb.Merge(merge,
+				llb.WithCustomNamef("[%s] merge %d groups", tag, len(names)))
 		}
 		if hooks.PhaseDone != nil {
 			if err := hooks.PhaseDone(plan); err != nil {
@@ -218,15 +199,6 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		}
 		cur = plan.Output
 		sources[ph.Name] = cur
-		for name, st := range r.Stages {
-			if st.FromPhase != ph.Name {
-				continue
-			}
-			if err := prepare(name, st, cur); err != nil {
-				return nil, err
-			}
-			sources[name] = b.Stages[name]
-		}
 		b.Phases = append(b.Phases, plan)
 	}
 	b.Final = cur
@@ -270,9 +242,9 @@ func mergeEnv(maps ...map[string]string) map[string]string {
 // in the state, so it never leaks into other groups, later phases or the
 // image configuration.
 //
-// Every run gets an empty tmpfs at each of the volatile paths, unless it
-// mounts something there itself.
-func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, ctxSrc llb.State, stages map[string]llb.State, scope string, volatile []string) (llb.State, error) {
+// Every run gets the mounts of settings.mounts (defaults), unless it
+// mounts something at the same target itself.
+func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, ctxSrc llb.State, stages map[string]llb.State, scope string, defaults []recipe.Mount) (llb.State, error) {
 	for _, c := range cmds {
 		switch cmd := c.(type) {
 		case recipe.EnvCmd:
@@ -288,12 +260,14 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 			for _, m := range cmd.Mounts {
 				own[path.Clean(m.Target)] = true
 			}
-			for _, v := range volatile {
-				if !own[v] {
-					opts = append(opts, llb.AddMount(v, llb.Scratch(), llb.Tmpfs()))
+			var all []recipe.Mount
+			for _, m := range defaults {
+				if !own[m.Target] {
+					all = append(all, m)
 				}
 			}
-			for _, m := range cmd.Mounts {
+			all = append(all, cmd.Mounts...)
+			for _, m := range all {
 				if m.Type == "tmpfs" {
 					opts = append(opts, llb.AddMount(m.Target, llb.Scratch(), llb.Tmpfs()))
 					continue

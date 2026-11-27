@@ -5,18 +5,13 @@ to be tried on a real machine. Nothing here is a promise of a date.
 
 ## Planned
 
-### Imports from outside the recipe (frontend)
+### Imports from OCI artifacts (frontend)
 
-Parts that many recipes need, network setup or a desktop for instance,
-should be shareable without copying them around. `imports:` should
-therefore also accept:
-
-- an HTTPS URL, pinned by its sha256;
-- an OCI artifact, pinned by digest (`oci://registry/name@sha256:…`).
-
-Open questions: how files that such an import copies are fetched (the
-import's own context next to the recipe's), and how Renovate updates the
-pins.
+Imports by URL work (see the README). Still open: an OCI artifact,
+pinned by digest (`oci://registry/name@sha256:…`), and how Renovate
+updates the pins of both. Open as well: files that such an import
+copies, which today can only come from the recipe directory (the
+import's own context next to the recipe's).
 
 ### Secure Boot (frontend, CLI, base image)
 
@@ -46,8 +41,6 @@ Imports merge as JSON Merge Patch (see the README). Still open:
 - Changing one entry of a list (one command of a group, one package)
   without restating the list, in the spirit of kustomize's strategic
   merge patch. Today a list is replaced as a whole.
-- `nomira graph` showing where each phase and group came from, as the
-  resolved recipe already does in its comments.
 - `nomira recipe diff` that shows changes per phase and group rather
   than as lines.
 
@@ -56,10 +49,10 @@ Imports merge as JSON Merge Patch (see the README). Still open:
 A collector runs one command with all items, so adding one package
 installs all of them again: from the package cache, but still unpacked,
 with all hooks, a new initramfs included. Splitting the packages over
-several collector phases (things that rarely change first) avoids that
-by hand. Better: the collector runs once per group, in a fixed order,
-each run on top of the previous one, so a new item only reruns the
-groups after it. Open: the order (by group name, or by phase), and
+several collectors in phases one after the other (things that rarely
+change first) avoids that by hand. Better: the collector runs once per
+group, in a fixed order, each run on top of the previous one, so a new
+item only reruns the groups after it. Open: the order (by group name, or by phase), and
 removals, which still rebuild from the first changed group.
 
 ## To be tried on a real machine

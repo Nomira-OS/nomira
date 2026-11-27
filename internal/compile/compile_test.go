@@ -17,21 +17,19 @@ build:
   packages:
     collect: run apk add ${items}
   features:
-    groups:
-      copies:
-        - copy files/a /etc/a
-      runs:
-        tools: [curl]
-        commands:
-          - run echo b > /etc/b
-      only-contributes:
-        tools: [jq]
+    copies:
+      - copy files/a /etc/a
+    runs:
+      tools: [curl]
+      commands:
+        - run echo b > /etc/b
+    only-contributes:
+      tools: [jq]
   tools:
     collect: run apk add ${items}
   single:
-    groups:
-      alone:
-        - copy files/c /etc/c
+    alone:
+      - copy files/c /etc/c
 `
 
 // ops returns the kinds of all ops a state depends on, and whether the
@@ -68,7 +66,7 @@ func ops(t *testing.T, st llb.State, image string) (kinds map[string]int, usesIm
 }
 
 func TestCompileShapes(t *testing.T) {
-	r, err := recipe.Parse([]byte(src), nil)
+	r, err := recipe.Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,8 +132,11 @@ func TestCompileShapes(t *testing.T) {
 
 	// The second collector runs once with both items.
 	tools := b.Phases[2]
-	if strings.Join(tools.Phase.Items, " ") != "curl jq" {
-		t.Errorf("items: %v", tools.Phase.Items)
+	if g := tools.Phase.Groups["tools"]; strings.Join(g.Items, " ") != "curl jq" {
+		t.Errorf("items: %v", g.Items)
+	}
+	if k, _ := ops(t, tools.Output, ""); k["exec"] != 2 || k["merge"] != 1 {
+		t.Errorf("tools output: %v", k)
 	}
 
 	// A single isolated group is merged rather than run on the input.
@@ -149,7 +150,7 @@ func TestCompileShapes(t *testing.T) {
 }
 
 func TestDecideFallsBack(t *testing.T) {
-	r, err := recipe.Parse([]byte(src), nil)
+	r, err := recipe.Parse([]byte(src))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,5 +176,57 @@ func TestDecideFallsBack(t *testing.T) {
 	// Single group on the input: no merge of its own.
 	if k, _ := ops(t, b.Phases[3].Output, ""); k["merge"] != 1 {
 		t.Errorf("single fallback output: %v", k)
+	}
+}
+
+func TestDefaultMounts(t *testing.T) {
+	r, err := recipe.Parse([]byte(`
+settings:
+  base: docker.io/library/alpine:3.22
+  mounts:
+    /var/log: type=tmpfs
+    /var/cache/apk: type=cache,sharing=locked
+stages:
+  s: {from: docker.io/library/alpine:3.22, commands: [run make]}
+build:
+  a:
+    g: ['run --mount=type=cache,target=/var/cache/apk,id=own apk add x']
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Compile(r, Hooks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mounts := func(st llb.State) map[string]string {
+		def, err := st.Marshal(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]string{}
+		for _, dt := range def.Def {
+			var op pb.Op
+			if err := op.UnmarshalVT(dt); err != nil {
+				t.Fatal(err)
+			}
+			if e, ok := op.Op.(*pb.Op_Exec); ok {
+				for _, m := range e.Exec.Mounts {
+					switch m.MountType {
+					case pb.MountType_TMPFS:
+						out[m.Dest] = "tmpfs"
+					case pb.MountType_CACHE:
+						out[m.Dest] = "cache " + m.CacheOpt.ID
+					}
+				}
+			}
+		}
+		return out
+	}
+	if m := mounts(b.Final); m["/var/log"] != "tmpfs" || m["/var/cache/apk"] != "cache own" {
+		t.Errorf("phase mounts: %v", m)
+	}
+	if m := mounts(b.Stages["s"]); m["/var/log"] != "tmpfs" || m["/var/cache/apk"] != "cache /var/cache/apk" {
+		t.Errorf("stage mounts: %v", m)
 	}
 }

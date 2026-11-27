@@ -6,7 +6,7 @@ Guidance for coding agents (and humans) working in this repository.
 
 `nomira` is a BuildKit gateway frontend. It compiles a YAML recipe into an
 LLB graph: phases run serially, the groups of a phase fan out on the same
-base state, are diffed, checked for write-set disjointness, and merged.
+base state, are diffed, checked for conflicts, and merged.
 Recipes select it with `# syntax=ghcr.io/nomira-os/nomira:1-alpha`.
 
 The project is in alpha: the schema may still change, but every change
@@ -24,13 +24,15 @@ Sibling repositories in the Nomira-OS organization:
 ## Layout
 
 - `internal/recipe`: schema, parser, merging of `imports`. No BuildKit imports.
-- `internal/conflict`: disjointness check. Pure, no BuildKit imports.
-- `internal/compile`: recipe to LLB; `lister.sh` collects a group's write set,
-  `guard.sh` decides whether a group without `run` may be built apart from
-  the state before it.
-- `internal/frontend`: gateway entrypoint, image config.
-- `cmd/frontend`: the binary; also the `lint`, `graph`, `inspect` and `resolve` modes
-  that the CLI calls through the image.
+- `internal/conflict`: the conflict check. Pure, no BuildKit imports.
+- `internal/compile`: recipe to LLB; `lister.sh` lists a group's writes and
+  deletions (pass 1), `hash.sh` hashes the paths several groups write
+  (pass 2), `guard.sh` decides whether a group without `run` may be built
+  apart from the state before it.
+- `internal/frontend`: gateway entrypoint, image config, the modes lint
+  and resolve (build option `mode`), imports by URL.
+- `cmd/frontend`: the binary.
+- `schema/recipe.schema.json`: JSON Schema of the recipe, for editors.
 - `docs/concept.md`: the original design. Historical; the README is authoritative.
 
 ## Commands
@@ -39,10 +41,9 @@ Sibling repositories in the Nomira-OS organization:
 gofmt -l .                                   # must print nothing
 go vet ./...
 go test ./...
-sh hack/test_lister.sh                       # tests internal/compile/lister.sh
+sh hack/test_lister.sh                       # tests lister.sh and hash.sh
 sh hack/test_guard.sh                        # tests internal/compile/guard.sh
 sh hack/e2e.sh                               # real builds; needs BuildKit, see its header
-go run ./cmd/frontend lint examples/recipe.yml
 ```
 
 CI runs exactly these through the shared workflows in `Nomira-OS/ci`,
@@ -51,13 +52,17 @@ there, not here.
 
 ## Rules
 
-- **Schema changes** touch four places together: the parser, its tests,
-  the README and `examples/recipe.yml`. YAML decoding is strict; unknown
-  keys are errors, also in imported files.
+- **Schema changes** touch five places together: the parser, its tests,
+  the README, `schema/recipe.schema.json` and `examples/`. YAML decoding
+  is strict; unknown keys are errors, also in imported files, and name
+  the file and line. A removed key gets a hint where it went.
+- **Client options stay out of the recipe.** What only a BuildKit client
+  can set (exporter options, names, platform, where secrets come from) is
+  never a recipe key.
 - **Error messages** speak in recipe terms (phase, group, path), never in
   LLB vertex ids.
-- **`lister.sh` and `guard.sh`** must run with busybox tools only and are
-  covered by `hack/test_lister.sh` and `hack/test_guard.sh`. Extend the test
+- **`lister.sh`, `hash.sh` and `guard.sh`** must run with busybox tools
+  only and are covered by `hack/test_lister.sh` and `hack/test_guard.sh`. Extend the test
   when you change a script.
 - **Behaviour in BuildKit needs an end-to-end test.** What a diff contains,
   what a merge does to links and modes, what is cached: none of that shows

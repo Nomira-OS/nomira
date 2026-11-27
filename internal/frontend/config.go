@@ -6,16 +6,14 @@ import (
 	"time"
 )
 
-const descriptionLabel = "org.opencontainers.image.description"
-
 // imageConfig derives the exported image's config from the base image's:
 // it keeps everything (entrypoint, env, the containers.bootc label …), adds
-// the recipe's labels and description, and drops rootfs and history, which
+// the labels, and drops rootfs and history, which
 // describe the base's layers and are rebuilt by the exporter.
 //
 // The creation time is the source date epoch; without one (nil) the
 // exporter sets the time of the build.
-func imageConfig(base []byte, description string, labels map[string]string, epoch *int64) ([]byte, error) {
+func imageConfig(base []byte, labels map[string]string, epoch *int64) ([]byte, error) {
 	var img map[string]any
 	if err := json.Unmarshal(base, &img); err != nil {
 		return nil, fmt.Errorf("parse base image config: %w", err)
@@ -28,7 +26,7 @@ func imageConfig(base []byte, description string, labels map[string]string, epoc
 		delete(img, "created")
 	}
 
-	if description != "" || len(labels) > 0 {
+	if len(labels) > 0 {
 		cfg, _ := img["config"].(map[string]any)
 		if cfg == nil {
 			cfg = map[string]any{}
@@ -38,9 +36,6 @@ func imageConfig(base []byte, description string, labels map[string]string, epoc
 		if merged == nil {
 			merged = map[string]any{}
 			cfg["Labels"] = merged
-		}
-		if description != "" {
-			merged[descriptionLabel] = description
 		}
 		for k, v := range labels {
 			merged[k] = v

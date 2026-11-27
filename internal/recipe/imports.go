@@ -3,6 +3,7 @@ package recipe
 import (
 	"bytes"
 	"fmt"
+	"net/url"
 	"path"
 	"sort"
 	"strings"
@@ -16,7 +17,11 @@ type ReadFunc func(name string) ([]byte, error)
 
 // Imports
 //
-// A recipe file may start with `imports:`, a list of further recipe files.
+// A recipe file may start with `imports:`, a list of further recipe files:
+// paths relative to the importing file, or URLs. An https URL may be
+// pinned with #sha256=<hex>; an http URL must be, since nothing else
+// vouches for what it serves. A file read from a URL imports relative to
+// its URL.
 // Each of them is a recipe of its own (with imports of its own) or a part
 // of one. The files are merged into one document, in this order: the
 // imports in the order they are listed, each with its own imports first,
@@ -117,7 +122,7 @@ func (l *loader) load(name string) (*yaml.Node, error) {
 	for _, imp := range imports {
 		p, err := resolveImport(name, imp)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%s: %w", name, err)
 		}
 		sub, err := l.load(p)
 		if err != nil {
@@ -199,15 +204,66 @@ func (l *loader) mark(n *yaml.Node, name string) error {
 	return nil
 }
 
+// resolveImport returns the name of import imp of file from: a path
+// relative to the recipe directory, or a URL. A relative import of a file
+// read from a URL is resolved against that URL. A URL may end in
+// #sha256=<hex>, which the reader checks.
 func resolveImport(from, imp string) (string, error) {
+	if IsURL(imp) {
+		_, sum, err := SplitPin(imp)
+		if err != nil {
+			return "", err
+		}
+		if sum == "" && strings.HasPrefix(imp, "http://") {
+			return "", fmt.Errorf("import %q: an http URL needs a #sha256= pin; or use https", imp)
+		}
+		return imp, nil
+	}
 	if imp == "" || strings.HasPrefix(imp, "/") {
-		return "", fmt.Errorf("%s: import %q must be a relative path", from, imp)
+		return "", fmt.Errorf("import %q must be a relative path or a URL", imp)
+	}
+	if IsURL(from) {
+		base, _, _ := SplitPin(from)
+		u, err := url.Parse(base)
+		if err != nil {
+			return "", err
+		}
+		ref, err := url.Parse(imp)
+		if err != nil {
+			return "", fmt.Errorf("import %q: %w", imp, err)
+		}
+		abs := u.ResolveReference(ref).String()
+		if _, sum, err := SplitPin(abs); err != nil {
+			return "", err
+		} else if sum == "" && strings.HasPrefix(abs, "http://") {
+			return "", fmt.Errorf("import %q: an http URL needs a #sha256= pin; or use https", imp)
+		}
+		return abs, nil
 	}
 	p := path.Clean(path.Join(path.Dir(from), imp))
 	if p == ".." || strings.HasPrefix(p, "../") {
-		return "", fmt.Errorf("%s: import %q is outside the recipe directory", from, imp)
+		return "", fmt.Errorf("import %q is outside the recipe directory", imp)
 	}
 	return p, nil
+}
+
+// IsURL reports whether an import names a file on the web.
+func IsURL(name string) bool {
+	return strings.HasPrefix(name, "https://") || strings.HasPrefix(name, "http://")
+}
+
+// SplitPin splits an import URL into the URL to fetch and the sha256 the
+// content must have ("" when the URL has no #sha256=<hex>).
+func SplitPin(name string) (u, sha256 string, err error) {
+	u, frag, ok := strings.Cut(name, "#")
+	if !ok {
+		return name, "", nil
+	}
+	sum, ok := strings.CutPrefix(frag, "sha256=")
+	if !ok || len(sum) != 64 || strings.Trim(sum, "0123456789abcdef") != "" {
+		return "", "", fmt.Errorf("import %q: the fragment must be #sha256= and 64 lowercase hex digits", name)
+	}
+	return u, sum, nil
 }
 
 func isNull(n *yaml.Node) bool {
@@ -346,11 +402,9 @@ func (d *document) resolved(entry string) ([]byte, error) {
 			if k.Value != keyBuild {
 				continue
 			}
-			ph := v.Content[j+1]
-			if g := indexOf(ph, "groups"); g >= 0 && ph.Content[g+1].Kind == yaml.MappingNode {
-				groups := ph.Content[g+1]
-				for n := 0; n+1 < len(groups.Content); n += 2 {
-					note(groups.Content[n], groups.Content[n+1])
+			if ph := v.Content[j+1]; ph.Kind == yaml.MappingNode {
+				for n := 0; n+1 < len(ph.Content); n += 2 {
+					note(ph.Content[n], ph.Content[n+1])
 				}
 			}
 		}
@@ -378,122 +432,10 @@ func (d *document) resolved(entry string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// ---- decoding the merged document --------------------------------------
-
-// Keys with a fixed meaning in the long form of a group. Every other key
-// is a contribution to the collector phase of that name.
 const (
-	keyCommands = "commands"
-	keyStages   = "stages"
-	keyExpects  = "expects"
-	keyBuild    = "build"
+	keyStages = "stages"
+	keyBuild  = "build"
 )
-
-// ReservedGroupKey reports whether name has a fixed meaning in a group and
-// therefore cannot name a collector phase.
-func ReservedGroupKey(name string) bool {
-	switch name {
-	case keyCommands, keyStages, keyExpects:
-		return true
-	}
-	return false
-}
-
-// rawGroup is a group in the YAML. Short form: a sequence of commands.
-// Long form: a mapping with commands, stages, expects and contributions.
-type rawGroup struct {
-	Commands   []string
-	Stages     map[string]rawStage
-	Expects    []string
-	Contribute map[string][]string
-}
-
-func (g *rawGroup) UnmarshalYAML(n *yaml.Node) error {
-	switch n.Kind {
-	case yaml.SequenceNode:
-		return n.Decode(&g.Commands)
-	case yaml.MappingNode:
-		for i := 0; i+1 < len(n.Content); i += 2 {
-			k, v := n.Content[i], n.Content[i+1]
-			var err error
-			switch k.Value {
-			case keyCommands:
-				err = v.Decode(&g.Commands)
-			case keyStages:
-				g.Stages = map[string]rawStage{}
-				if v.Kind != yaml.MappingNode {
-					err = fmt.Errorf("expected a mapping of stage names")
-					break
-				}
-				for j := 0; j+1 < len(v.Content) && err == nil; j += 2 {
-					var st rawStage
-					if err = decodeStrict(v.Content[j+1], &st); err == nil {
-						g.Stages[v.Content[j].Value] = st
-					}
-				}
-			case keyExpects:
-				err = v.Decode(&g.Expects)
-			default:
-				var items []string
-				if err = v.Decode(&items); err != nil {
-					err = fmt.Errorf("a contribution must be a list of strings")
-					break
-				}
-				if g.Contribute == nil {
-					g.Contribute = map[string][]string{}
-				}
-				g.Contribute[k.Value] = items
-			}
-			if err != nil {
-				return fmt.Errorf("line %d: %s: %w", k.Line, k.Value, err)
-			}
-		}
-		return nil
-	}
-	return fmt.Errorf("line %d: expected a command list or a group mapping", n.Line)
-}
-
-// rawPhase is a phase under build; its name is the key.
-type rawPhase struct {
-	Name       string              `yaml:"-"`
-	Validation string              `yaml:"validation"`
-	Shared     []string            `yaml:"shared"`
-	Env        map[string]string   `yaml:"env"`
-	Collect    string              `yaml:"collect"`
-	Groups     map[string]rawGroup `yaml:"groups"`
-}
-
-// phaseList decodes build, keeping the order of its keys.
-func phaseList(n *yaml.Node) ([]rawPhase, error) {
-	if n == nil || n.Kind == 0 {
-		return nil, nil
-	}
-	if n.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("line %d: build: expected a mapping of phase names", n.Line)
-	}
-	var out []rawPhase
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		var p rawPhase
-		if err := decodeStrict(n.Content[i+1], &p); err != nil {
-			return nil, fmt.Errorf("build.%s: %w", n.Content[i].Value, err)
-		}
-		p.Name = n.Content[i].Value
-		out = append(out, p)
-	}
-	return out, nil
-}
-
-// decodeStrict decodes a node rejecting unknown keys (Node.Decode does not
-// inherit the decoder's KnownFields setting).
-func decodeStrict(n *yaml.Node, out any) error {
-	buf, err := yaml.Marshal(n)
-	if err != nil {
-		return err
-	}
-	dec := yaml.NewDecoder(bytes.NewReader(buf))
-	dec.KnownFields(true)
-	return dec.Decode(out)
-}
 
 // blockStyle writes every mapping in block style: comments only work
 // there, and one style for every recipe keeps diffs between resolved

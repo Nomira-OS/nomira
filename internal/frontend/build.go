@@ -1,7 +1,11 @@
-// Package frontend wires recipe parsing, LLB compilation and write-set
-// validation into a BuildKit gateway frontend. The same binary also serves
-// `lint` and `graph` modes (see cmd/frontend) so a thin CLI in any language
-// can reuse the parser by running the frontend image via podman.
+// Package frontend wires recipe parsing, LLB compilation and the conflict
+// check into a BuildKit gateway frontend.
+//
+// Besides building, it answers two questions about a recipe through
+// BuildKit, selected with the option mode: lint (does it parse?) and
+// resolve (what is it with all imports merged?). Both return a small
+// tree for --output type=local: recipe.yml (resolve only) and version,
+// the version of the frontend.
 package frontend
 
 import (
@@ -15,6 +19,7 @@ import (
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	commonexptypes "github.com/moby/buildkit/exporter/exptypes"
 	"github.com/moby/buildkit/frontend/gateway/client"
+	digest "github.com/opencontainers/go-digest"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/Nomira-OS/nomira/internal/compile"
@@ -26,8 +31,15 @@ const (
 	localDockerfile = "dockerfile" // BuildKit's name for the frontend-file source
 	keyFilename     = "filename"
 	defaultFilename = "recipe.yml"
-	buildArgPrefix  = "build-arg:"
 	keyResolveMode  = "image-resolve-mode"
+	keyMode         = "mode"
+	keyToolbox      = "toolbox"
+
+	// DefaultToolbox is the image the checks run in: busybox's find, sort,
+	// comm, sed, sha256sum and stat. Tests set another with the option
+	// toolbox.
+	// renovate: datasource=docker
+	DefaultToolbox = "docker.io/library/busybox:1.38.0"
 )
 
 // Build is the gateway entrypoint (grpcclient.RunFromEnvironment target).
@@ -53,16 +65,21 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		return nil, fmt.Errorf("image-resolve-mode %q: expected default, pull or local", mode)
 	}
 
-	buildArgs := map[string]string{}
-	for k, v := range opts {
-		if name, ok := strings.CutPrefix(k, buildArgPrefix); ok {
-			buildArgs[name] = v
-		}
+	toolbox := opts[keyToolbox]
+	if toolbox == "" {
+		toolbox = DefaultToolbox
 	}
 
-	r, err := recipe.ParseFile(filename, read, buildArgs)
+	r, err := recipe.ParseFile(filename, read)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", filename, err)
+		return nil, fmt.Errorf("recipe: %w", err)
+	}
+	switch mode := opts[keyMode]; mode {
+	case "", "build":
+	case "lint", "resolve":
+		return answer(ctx, c, mode, r)
+	default:
+		return nil, fmt.Errorf("mode %q: expected build, lint or resolve", mode)
 	}
 
 	// Carry the base image's config (entrypoint, env, labels …) so the
@@ -88,7 +105,7 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	// merged on top of it or exported.
 	b, err := compile.Compile(r, compile.Hooks{
 		Decide: func(ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
-			return dependent(ctx, c, r, ph, lower, alone)
+			return dependent(ctx, c, r, toolbox, ph, lower, alone)
 		},
 		PhaseDone: func(plan compile.PhasePlan) error {
 			if err := checkExpects(ctx, c, plan); err != nil {
@@ -97,7 +114,7 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 			if !plan.Validate {
 				return nil
 			}
-			return validatePhase(ctx, c, r, plan)
+			return checkConflicts(ctx, c, r, toolbox, plan)
 		},
 	})
 	if err != nil {
@@ -125,7 +142,9 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	if r.Settings.Record {
 		labels[recipe.RecipeLabel] = string(r.Resolved)
 	}
-	cfg, err := imageConfig(base, r.Settings.Description, labels, epoch)
+	// The client compares it with its own version after the build.
+	labels[recipe.FrontendVersionLabel] = Version
+	cfg, err := imageConfig(base, labels, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -142,12 +161,39 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	return out, nil
 }
 
+// answer solves the result of mode lint or resolve.
+func answer(ctx context.Context, c client.Client, mode string, r *recipe.Recipe) (*client.Result, error) {
+	st := llb.Scratch().File(llb.Mkfile("/version", 0o644, []byte(Version+"\n")),
+		llb.WithCustomName("["+mode+"] version"))
+	if mode == "resolve" {
+		st = st.File(llb.Mkfile("/recipe.yml", 0o644, r.Resolved), llb.WithCustomName("[resolve] recipe.yml"))
+	}
+	def, err := st.Marshal(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.Solve(ctx, client.SolveRequest{Definition: def.ToPB()})
+}
+
 // recipeReader returns a reader for the files of the recipe. Each file is
 // loaded on its own from the "dockerfile" local source when the parser
 // asks for it, so nothing but the entry file and what it includes leaves
-// the recipe directory.
+// the recipe directory. An import by URL is fetched by BuildKit, and
+// checked against its #sha256= when it has one.
 func recipeReader(ctx context.Context, c client.Client) recipe.ReadFunc {
 	return func(name string) ([]byte, error) {
+		if recipe.IsURL(name) {
+			u, sum, err := recipe.SplitPin(name)
+			if err != nil {
+				return nil, err
+			}
+			const file = "recipe.yml"
+			hopts := []llb.HTTPOption{llb.Filename(file), llb.WithCustomName("[load] " + u)}
+			if sum != "" {
+				hopts = append(hopts, llb.Checksum(digest.NewDigestFromEncoded(digest.SHA256, sum)))
+			}
+			return solveAndRead(ctx, c, llb.HTTP(u, hopts...), file)
+		}
 		src := llb.Local(localDockerfile,
 			llb.IncludePatterns([]string{name}),
 			llb.ExcludePatterns(compile.ContextExcludes),
@@ -180,14 +226,14 @@ func recipeReader(ctx context.Context, c client.Client) recipe.ReadFunc {
 // (client.Warn would be the natural channel, but a warning is tied to a
 // vertex digest, and the solver's digests differ from those of the LLB
 // definition; such warnings were silently dropped when tried.)
-func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
+func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, toolbox string, ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
 	var mu sync.Mutex
 	rejected := map[string]string{}
 	eg, ectx := errgroup.WithContext(ctx)
 	for group, upper := range alone {
 		group, upper := group, upper
 		eg.Go(func() error {
-			st := compile.GuardState(r.Settings.Toolbox, lower, upper, compile.PhaseTag(r, phaseIndex(r, ph.Name)), group)
+			st := compile.GuardState(toolbox, lower, upper, compile.PhaseTag(r, phaseIndex(r, ph.Name)), group)
 			data, err := solveAndRead(ectx, c, st, compile.GuardPath)
 			if err != nil {
 				return fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
@@ -283,18 +329,16 @@ func solveAndRead(ctx context.Context, c client.Client, st llb.State, filename s
 	return ref.ReadFile(ctx, client.ReadRequest{Filename: filename})
 }
 
-// validatePhase collects each group's write set (in parallel) and checks
-// pairwise disjointness under the phase's policy.
-func validatePhase(ctx context.Context, c client.Client, r *recipe.Recipe, plan compile.PhasePlan) error {
-	policy := plan.Phase.Policy(r.Settings.Validation)
-
-	type result struct {
-		group   string
-		entries []conflict.Entry
-	}
+// checkConflicts checks that the groups of a phase are independent, in
+// two passes (see package conflict): every group's write set, in
+// parallel; then, for the paths that more than one group writes, their
+// content and metadata.
+func checkConflicts(ctx context.Context, c client.Client, r *recipe.Recipe, toolbox string, plan compile.PhasePlan) error {
+	name := plan.Phase.Name
+	tag := compile.PhaseTag(r, phaseIndex(r, name))
+	var mu sync.Mutex
+	sets := map[string][]conflict.Entry{}
 	eg, ectx := errgroup.WithContext(ctx)
-	results := make(chan result, len(plan.Uppers))
-
 	for _, g := range plan.Phase.BuildGroupNames() {
 		g := g
 		eg.Go(func() error {
@@ -303,29 +347,48 @@ func validatePhase(ctx context.Context, c client.Client, r *recipe.Recipe, plan 
 				up := plan.Uppers[g]
 				lower, upper = &plan.Input, &up
 			}
-			st := compile.WriteSetState(r.Settings.Toolbox, lower, upper, plan.Layers[g], compile.PhaseTag(r, phaseIndex(r, plan.Phase.Name)), g)
+			st := compile.WriteSetState(toolbox, lower, upper, plan.Layers[g], tag, g)
 			data, err := solveAndRead(ectx, c, st, compile.WritesPath)
 			if err != nil {
-				return fmt.Errorf("phase %q group %q: collect write set: %w", plan.Phase.Name, g, err)
+				return fmt.Errorf("phase %q group %q: collect write set: %w", name, g, err)
 			}
 			entries, err := conflict.ParseWriteSet(string(data))
 			if err != nil {
-				return fmt.Errorf("phase %q group %q: %w", plan.Phase.Name, g, err)
+				return fmt.Errorf("phase %q group %q: %w", name, g, err)
 			}
-			results <- result{group: g, entries: entries}
+			mu.Lock()
+			sets[g] = entries
+			mu.Unlock()
 			return nil
 		})
 	}
 	if err := eg.Wait(); err != nil {
 		return err
 	}
-	close(results)
 
-	sets := map[string][]conflict.Entry{}
-	for res := range results {
-		sets[res.group] = res.entries
+	eg, ectx = errgroup.WithContext(ctx)
+	for g, paths := range conflict.Overlaps(sets) {
+		g, paths := g, paths
+		eg.Go(func() error {
+			st := compile.HashState(toolbox, plan.Layers[g], paths, tag, g)
+			data, err := solveAndRead(ectx, c, st, compile.HashesPath)
+			if err != nil {
+				return fmt.Errorf("phase %q group %q: hash shared paths: %w", name, g, err)
+			}
+			tokens, err := conflict.ParseHashes(string(data))
+			if err != nil {
+				return fmt.Errorf("phase %q group %q: %w", name, g, err)
+			}
+			mu.Lock()
+			conflict.SetTokens(sets[g], tokens)
+			mu.Unlock()
+			return nil
+		})
 	}
-	return conflict.Check(plan.Phase.Name, policy, plan.Phase.Shared, sets)
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+	return conflict.Check(name, sets)
 }
 
 // resolveBaseConfig fetches the base image's OCI config bytes.
