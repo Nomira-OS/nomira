@@ -88,8 +88,9 @@ settings:
   compression: zstd                         # zstd | gzip | uncompressed, see below
   secrets:                                  # secret id: file on the build machine
     db.key: /etc/kernel/secureboot/db.key
-  source_date_epoch: 1794268800             # default: creation time of the base image, see below
-  record: true                              # true | false | a phase name, see below
+  source_date_epoch: 1794268800             # seconds | true (default: the base image's time) | false
+  record: true                              # the recipe in /usr/share/nomira/recipe, see below
+  volatile: [/run, /tmp, /var/cache, /var/log, /var/tmp]   # the default, see below
 
 prepare:                                    # optional named stages (multi-stage)
   aurbuild:
@@ -99,7 +100,7 @@ prepare:                                    # optional named stages (multi-stage
 
 phases:                                     # list: order matters
   - name: packages                          # a collector, see below
-    collect: run --mount=type=cache,target=/usr/lib/sysimage/cache/pacman/pkg pacman -S --needed --noconfirm ${items}
+    collect: run --mount=type=cache,target=/var/cache/pacman/pkg pacman -S --needed --noconfirm ${items}
 
   - name: features
     validation: allow-identical             # a phase overrides the default
@@ -197,7 +198,8 @@ exported image takes it as its creation time. With the exporter option
 the files in the recipe's layers are clamped to it as well; the base
 image's layers stay as they are. Without the setting it is the creation
 time of the base image, so a recipe builds the same image every time
-from the same base.
+from the same base. `source_date_epoch: false` turns all of that off:
+no variable, the build time as creation time, file times as they are.
 
 **`record`:** The image carries the recipe it was built from, below
 `/usr/share/nomira/recipe`: the entry file, every included file and what
@@ -208,8 +210,18 @@ after the last phase before the first one that reads an earlier phase (a
 bind mount or copy from it, or a prepare stage that starts from it), so
 that what such a phase derives from the image, a UKI with its digest for
 instance, covers it; without such a phase, after the last one.
-`record: <phase>` puts it after that phase instead, `record: false`
-leaves it out.
+As late as that, a change to the recipe only rebuilds what comes after
+it. `record: false` leaves it out.
+
+**`volatile`:** Every `run` gets an empty tmpfs at these paths, so
+nothing written there ends up in the image: logs, caches, temporary
+files. On a bootc system they hold no image content anyway: `/run` and
+`/tmp` are tmpfs at runtime, and bootc takes `/var` from an image only at
+the first install, never with an update (`bootc container lint` warns
+about logs and leftovers there). A `--mount` of the run at the same path
+takes its place, and mounts below them, a package cache in
+`/var/cache/pacman/pkg` for instance, work as usual. `volatile: []` turns
+it off; a list replaces the default.
 
 **What is loaded:** From the recipe directory the frontend reads only the
 entry file and the files it includes, one by one as it meets them, and

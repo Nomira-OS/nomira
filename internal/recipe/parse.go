@@ -33,17 +33,19 @@ type rawSettings struct {
 	Compression string            `yaml:"compression"`
 	Secrets     map[string]string `yaml:"secrets"`
 
-	SourceDateEpoch *int64    `yaml:"source_date_epoch"`
-	Record          rawRecord `yaml:"record"`
+	SourceDateEpoch rawEpoch  `yaml:"source_date_epoch"`
+	Record          *bool     `yaml:"record"`
+	Volatile        *[]string `yaml:"volatile"`
 }
 
-// rawRecord is settings.record: a boolean or a phase name.
-type rawRecord struct {
+// rawEpoch is settings.source_date_epoch: seconds since 1970, true for
+// the default, or false.
+type rawEpoch struct {
 	Off   bool
-	After string
+	Value *int64
 }
 
-func (r *rawRecord) UnmarshalYAML(n *yaml.Node) error {
+func (e *rawEpoch) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind == yaml.ScalarNode {
 		switch n.Tag {
 		case "!!bool":
@@ -51,16 +53,18 @@ func (r *rawRecord) UnmarshalYAML(n *yaml.Node) error {
 			if err := n.Decode(&on); err != nil {
 				return err
 			}
-			r.Off = !on
+			e.Off = !on
 			return nil
-		case "!!str":
-			if n.Value != "" {
-				r.After = n.Value
-				return nil
+		case "!!int":
+			var v int64
+			if err := n.Decode(&v); err != nil {
+				return err
 			}
+			e.Value = &v
+			return nil
 		}
 	}
-	return fmt.Errorf("line %d: settings.record: expected true, false or the name of a phase", n.Line)
+	return fmt.Errorf("line %d: settings.source_date_epoch: expected seconds since 1970, true or false", n.Line)
 }
 
 type rawStage struct {
@@ -151,8 +155,10 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Compression: raw.Settings.Compression,
 			Secrets:     expandMap(raw.Settings.Secrets, args),
 
-			SourceDateEpoch: raw.Settings.SourceDateEpoch,
-			Record:          Record{Off: raw.Settings.Record.Off, After: raw.Settings.Record.After},
+			SourceDateEpoch: raw.Settings.SourceDateEpoch.Value,
+			EpochOff:        raw.Settings.SourceDateEpoch.Off,
+			Record:          raw.Settings.Record == nil || *raw.Settings.Record,
+			Volatile:        DefaultVolatile,
 		},
 		Prepare: map[string]Stage{},
 	}
@@ -164,6 +170,15 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 	}
 	if e := r.Settings.SourceDateEpoch; e != nil && *e < 0 {
 		return nil, errf("recipe: settings.source_date_epoch: %d is before 1970", *e)
+	}
+	if v := raw.Settings.Volatile; v != nil {
+		r.Settings.Volatile = nil
+		for _, p := range *v {
+			if !strings.HasPrefix(p, "/") || p == "/" || path.Clean(p) != strings.TrimSuffix(p, "/") {
+				return nil, errf("recipe: settings.volatile: %q is not a clean absolute path below /", p)
+			}
+			r.Settings.Volatile = append(r.Settings.Volatile, path.Clean(p))
+		}
 	}
 	for _, p := range r.Settings.Platforms {
 		if os, arch, ok := strings.Cut(p, "/"); !ok || os == "" || arch == "" {
@@ -372,9 +387,6 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		run = resolved.(RunCmd)
 		r.Phases[i].Collect = &run
 		r.Phases[i].Items = list
-	}
-	if a := r.Settings.Record.After; a != "" && !seenPhase[a] {
-		return nil, errf("recipe: settings.record: no phase %q", a)
 	}
 	if err := linkStagesToPhases(r); err != nil {
 		return nil, err

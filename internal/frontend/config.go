@@ -13,15 +13,20 @@ const descriptionLabel = "org.opencontainers.image.description"
 // the recipe's labels and description, and drops rootfs and history, which
 // describe the base's layers and are rebuilt by the exporter.
 //
-// The creation time is the source date epoch.
-func imageConfig(base []byte, description string, labels map[string]string, epoch int64) ([]byte, error) {
+// The creation time is the source date epoch; without one (nil) the
+// exporter sets the time of the build.
+func imageConfig(base []byte, description string, labels map[string]string, epoch *int64) ([]byte, error) {
 	var img map[string]any
 	if err := json.Unmarshal(base, &img); err != nil {
 		return nil, fmt.Errorf("parse base image config: %w", err)
 	}
 	delete(img, "rootfs")
 	delete(img, "history")
-	img["created"] = time.Unix(epoch, 0).UTC().Format(time.RFC3339)
+	if epoch != nil {
+		img["created"] = time.Unix(*epoch, 0).UTC().Format(time.RFC3339)
+	} else {
+		delete(img, "created")
+	}
 
 	if description != "" || len(labels) > 0 {
 		cfg, _ := img["config"].(map[string]any)

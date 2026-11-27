@@ -230,6 +230,52 @@ EOF
   [ "$got" = "1970-01-01T00:20:34Z 1234" ] || fail "creation time and newest file in the last layer: $got"
 }
 
+# Logs, caches and temporary files never end up in the image: every run
+# gets a tmpfs at the volatile paths, unless the recipe empties the list.
+case_volatile() {
+  recipe volatile <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run echo l > /var/log/build.log && echo t > /tmp/t && mkdir -p /var/cache/x && echo c > /var/cache/x/c && echo kept > /etc/kept"]
+EOF
+  must_build volatile || return 0
+  has volatile etc/kept kept
+  hasnot volatile var/log/build.log
+  hasnot volatile tmp/t
+  hasnot volatile var/cache/x
+
+  # A cache mount below a volatile path still works.
+  recipe volatile_cache <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run --mount=type=cache,target=/var/cache/pkg,id=e2e-volatile echo x > /var/cache/pkg/f && cat /var/cache/pkg/f > /etc/nested"]
+EOF
+  must_build volatile_cache || return 0
+  has volatile_cache etc/nested x
+  hasnot volatile_cache var/cache/pkg/f
+
+  RECIPE_SETTINGS="volatile: []" recipe volatile_off <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run echo l > /var/log/build.log"]
+EOF
+  must_build volatile_off || return 0
+  has volatile_off var/log/build.log l
+
+  # Without a source date epoch, runs do not see SOURCE_DATE_EPOCH.
+  RECIPE_SETTINGS="source_date_epoch: false" recipe epoch_off <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run echo \"[${SOURCE_DATE_EPOCH:-}]\" > /etc/epoch"]
+EOF
+  must_build epoch_off || return 0
+  has epoch_off etc/epoch '[]'
+}
+
 case_secret_mount() {
   RECIPE_SETTINGS="secrets: {tok: tok}" recipe secret_mount <<'EOF'
 phases:
@@ -621,7 +667,7 @@ delete_alone_is_fine allow_identical shared rewrite_counts_as_write serial_phase
 collectors long_form_and_includes expects independent_of_base fallback_symlink
 fallback_mode fallback_type isolated_single_group tmpfs_mount
 context_excludes_output uki secret_mount stage_from_phase record
-source_date_epoch"
+source_date_epoch volatile"
 
 for c in ${*:-$all}; do
   count=$((count + 1))

@@ -544,17 +544,13 @@ phases:
 		t.Errorf("record after phase %d, want 1", got)
 	}
 
-	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "  base: b\n", "  base: b\n  record: features\n", 1)
-	if r, err = ParseFile("recipe.yml", read, nil); err != nil || r.RecordPhase() != 0 {
-		t.Errorf("record: features: %v %v", r, err)
-	}
-	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "record: features", "record: false", 1)
+	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "  base: b\n", "  base: b\n  record: false\n", 1)
 	if r, err = ParseFile("recipe.yml", read, nil); err != nil || r.RecordPhase() != -1 {
 		t.Errorf("record: false: %v", err)
 	}
-	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "record: false", "record: nope", 1)
-	if _, err = ParseFile("recipe.yml", read, nil); err == nil || !strings.Contains(err.Error(), `no phase "nope"`) {
-		t.Errorf("record: nope: %v", err)
+	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "record: false", "record: features", 1)
+	if _, err = ParseFile("recipe.yml", read, nil); err == nil {
+		t.Errorf("record: features must be rejected")
 	}
 }
 
@@ -576,5 +572,31 @@ func TestSourceDateEpochSetting(t *testing.T) {
 	_, err = Parse([]byte("settings: {name: x, base: b, env: {SOURCE_DATE_EPOCH: '1'}}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
 	if err == nil || !strings.Contains(err.Error(), "settings.source_date_epoch") {
 		t.Errorf("env: %v", err)
+	}
+}
+
+func TestSourceDateEpochOff(t *testing.T) {
+	r, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: false}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	if err != nil || !r.Settings.EpochOff || r.Settings.SourceDateEpoch != nil {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if _, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: soon}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil); err == nil {
+		t.Error("source_date_epoch: soon must be rejected")
+	}
+}
+
+func TestVolatile(t *testing.T) {
+	r, err := Parse([]byte("settings: {name: x, base: b}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	if err != nil || strings.Join(r.Settings.Volatile, " ") != "/run /tmp /var/cache /var/log /var/tmp" {
+		t.Fatalf("default: %v %v", r.Settings.Volatile, err)
+	}
+	r, err = Parse([]byte("settings: {name: x, base: b, volatile: []}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	if err != nil || len(r.Settings.Volatile) != 0 {
+		t.Fatalf("empty: %v %v", r.Settings.Volatile, err)
+	}
+	for _, bad := range []string{"/", "var/log", "/var/../log"} {
+		if _, err := Parse([]byte("settings: {name: x, base: b, volatile: ['"+bad+"']}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil); err == nil {
+			t.Errorf("volatile %q must be rejected", bad)
+		}
 	}
 }

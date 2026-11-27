@@ -59,22 +59,16 @@ type Recipe struct {
 }
 
 // RecordPhase returns the index of the phase after which the record is
-// added, or -1 when settings.record is false. By default the record comes
-// right before the first phase that reads the result of an earlier phase
-// (a bind mount or copy from it, or a prepare stage that starts from it):
+// added, or -1 when settings.record is false. The record comes right
+// before the first phase that reads the result of an earlier phase (a
+// bind mount or copy from it, or a prepare stage that starts from it):
 // such a phase derives something from the image so far, a unified kernel
 // image with its digest for instance, which must already cover the
-// record. Without such a phase the record comes last.
+// record. Without such a phase the record comes last. As late as that,
+// a change to the recipe only rebuilds what comes after the record.
 func (r *Recipe) RecordPhase() int {
-	if r.Settings.Record.Off {
+	if !r.Settings.Record {
 		return -1
-	}
-	if a := r.Settings.Record.After; a != "" {
-		for i, ph := range r.Phases {
-			if ph.Name == a {
-				return i
-			}
-		}
 	}
 	for i := 1; i < len(r.Phases); i++ {
 		if r.readsEarlierPhase(i) {
@@ -180,25 +174,30 @@ type Settings struct {
 	Secrets     map[string]string
 	// SourceDateEpoch is the time, in seconds since 1970, that every run
 	// sees as SOURCE_DATE_EPOCH and to which the exported image clamps its
-	// timestamps. nil: the creation time of the base image.
+	// timestamps. nil: the creation time of the base image. EpochOff
+	// (source_date_epoch: false) turns all of that off.
 	SourceDateEpoch *int64
-	// Record says after which phase the recipe itself goes into the image,
-	// below RecordDir.
-	Record Record
+	EpochOff        bool
+	// Record says whether the recipe itself goes into the image, below
+	// RecordDir (see Recipe.RecordPhase for where).
+	Record bool
+	// Volatile are the paths that every run gets as an empty tmpfs:
+	// nothing written there ends up in the image.
+	Volatile []string
 }
+
+// DefaultVolatile are the paths of a bootc system that hold no image
+// content: they are tmpfs at runtime (/run, /tmp) or machine state in
+// /var that bootc never takes from an image after the first install
+// (logs, caches, temporary files). Writes there during the build are
+// build-time artifacts; bootc container lint warns about them.
+var DefaultVolatile = []string{"/run", "/tmp", "/var/cache", "/var/log", "/var/tmp"}
 
 // RecordDir is where the image keeps the recipe it was built from: the
 // recipe's files and everything its copy commands take from the build
 // context, at their paths relative to the recipe directory. It is below
 // /usr, so it is part of the verified, read-only image.
 const RecordDir = "/usr/share/nomira/recipe"
-
-// Record is settings.record: true (the default), false, or the name of
-// the phase after which the record is added.
-type Record struct {
-	Off   bool
-	After string
-}
 
 // Stage is a named prepare stage with its own base image.
 type Stage struct {

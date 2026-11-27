@@ -17,6 +17,7 @@ package compile
 import (
 	"fmt"
 	"os"
+	"path"
 	"sort"
 	"strings"
 
@@ -107,7 +108,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	// when something copies from it; the order here does not matter.
 	// Stages that start from a phase are built once that phase is done.
 	prepare := func(name string, st recipe.Stage, from llb.State) error {
-		state, err := applyCommands(from, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, fmt.Sprintf("prepare %s", name))
+		state, err := applyCommands(from, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, fmt.Sprintf("prepare %s", name), r.Settings.Volatile)
 		if err != nil {
 			return err
 		}
@@ -145,7 +146,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		if ph.IsCollector() {
 			plan.Output = cur
 			if len(ph.Items) > 0 {
-				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, sources, "collect "+ph.Name)
+				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, sources, "collect "+ph.Name, r.Settings.Volatile)
 				if err != nil {
 					return nil, err
 				}
@@ -157,7 +158,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			alone := map[string]llb.State{}
 			for _, g := range names {
 				if grp := ph.Groups[g]; !grp.HasRun() {
-					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, sources, fmt.Sprintf("%s/%s", ph.Name, g))
+					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, sources, fmt.Sprintf("%s/%s", ph.Name, g), r.Settings.Volatile)
 					if err != nil {
 						return nil, err
 					}
@@ -185,7 +186,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 						scope += ", WARNING: not independent of earlier state: " + reason
 					}
 				}
-				upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, sources, scope)
+				upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, sources, scope, r.Settings.Volatile)
 				if err != nil {
 					return nil, err
 				}
@@ -296,7 +297,10 @@ func mergeEnv(maps ...map[string]string) map[string]string {
 // for the commands that follow. It is passed to each run rather than stored
 // in the state, so it never leaks into other groups, later phases or the
 // image configuration.
-func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, ctxSrc llb.State, stages map[string]llb.State, scope string) (llb.State, error) {
+//
+// Every run gets an empty tmpfs at each of the volatile paths, unless it
+// mounts something there itself.
+func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, ctxSrc llb.State, stages map[string]llb.State, scope string, volatile []string) (llb.State, error) {
 	for _, c := range cmds {
 		switch cmd := c.(type) {
 		case recipe.EnvCmd:
@@ -307,6 +311,15 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 				llb.Args([]string{"/bin/sh", "-c", cmd.Script}),
 				llb.Dir("/"),
 				llb.WithCustomNamef("[%s] run %s", scope, firstLine(cmd.Script)),
+			}
+			own := map[string]bool{}
+			for _, m := range cmd.Mounts {
+				own[path.Clean(m.Target)] = true
+			}
+			for _, v := range volatile {
+				if !own[v] {
+					opts = append(opts, llb.AddMount(v, llb.Scratch(), llb.Tmpfs()))
+				}
 			}
 			for _, m := range cmd.Mounts {
 				if m.Type == "tmpfs" {

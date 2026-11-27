@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/moby/buildkit/frontend/gateway/grpcclient"
 	"github.com/moby/buildkit/util/appcontext"
@@ -131,11 +132,22 @@ func inspect() int {
 		Tags        []string          `json:"tags,omitempty"`
 		Compression string            `json:"compression"`
 		Secrets     map[string]string `json:"secrets,omitempty"`
-		Phases      []phase           `json:"phases"`
+		// "off", "base" (the base image's creation time) or the seconds.
+		SourceDateEpoch string   `json:"source_date_epoch"`
+		Record          bool     `json:"record"`
+		Volatile        []string `json:"volatile"`
+		Phases          []phase  `json:"phases"`
 	}{
 		Name: r.Settings.Name, Description: r.Settings.Description, Base: r.Settings.Base,
 		Platforms: r.Settings.Platforms, Tags: r.Settings.Tags,
 		Compression: r.Settings.Compression, Secrets: r.Settings.Secrets,
+		SourceDateEpoch: "base", Record: r.Settings.Record, Volatile: r.Settings.Volatile,
+	}
+	switch {
+	case r.Settings.EpochOff:
+		out.SourceDateEpoch = "off"
+	case r.Settings.SourceDateEpoch != nil:
+		out.SourceDateEpoch = strconv.FormatInt(*r.Settings.SourceDateEpoch, 10)
 	}
 	for _, p := range r.Phases {
 		ph := phase{Name: p.Name, Groups: p.GroupNames(), Items: p.Items}

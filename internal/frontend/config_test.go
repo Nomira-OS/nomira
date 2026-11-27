@@ -9,7 +9,7 @@ func TestImageConfig(t *testing.T) {
 	base := []byte(`{"architecture":"amd64","os":"linux",
 		"config":{"Cmd":["/sbin/init"],"Labels":{"containers.bootc":"1","a":"old"}},
 		"rootfs":{"type":"layers","diff_ids":["sha256:x"]},"history":[{"created_by":"x"}]}`)
-	out, err := imageConfig(base, "my system", map[string]string{"a": "new", "b": "2"}, 86400)
+	out, err := imageConfig(base, "my system", map[string]string{"a": "new", "b": "2"}, ptr(86400))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,9 +37,18 @@ func TestImageConfig(t *testing.T) {
 		t.Errorf("created = %v, want the epoch", img["created"])
 	}
 	// No labels requested and none in the base: only the time is set.
-	out, err = imageConfig([]byte(`{"os":"linux"}`), "", nil, 0)
+	out, err = imageConfig([]byte(`{"os":"linux"}`), "", nil, ptr(0))
 	if err != nil || string(out) != `{"created":"1970-01-01T00:00:00Z","os":"linux"}` {
 		t.Errorf("got %s, %v", out, err)
+	}
+}
+
+func ptr(v int64) *int64 { return &v }
+
+func TestImageConfigWithoutEpoch(t *testing.T) {
+	out, err := imageConfig([]byte(`{"created":"2026-01-01T00:00:00Z","os":"linux"}`), "", nil, nil)
+	if err != nil || string(out) != `{"os":"linux"}` {
+		t.Errorf("got %s, %v: the exporter should set the time", out, err)
 	}
 }
 

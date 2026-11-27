@@ -57,11 +57,15 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read image config of base %s: %w", r.Settings.Base, err)
 	}
-	epoch := sourceDateEpoch(r.Settings.SourceDateEpoch, base)
-	if r.Settings.Env == nil {
-		r.Settings.Env = map[string]string{}
+	var epoch *int64
+	if !r.Settings.EpochOff {
+		e := sourceDateEpoch(r.Settings.SourceDateEpoch, base)
+		epoch = &e
+		if r.Settings.Env == nil {
+			r.Settings.Env = map[string]string{}
+		}
+		r.Settings.Env[recipe.EpochVar] = strconv.FormatInt(e, 10)
 	}
-	r.Settings.Env[recipe.EpochVar] = strconv.FormatInt(epoch, 10)
 
 	// The graph is assembled phase by phase, looking at real results on the
 	// way: whether a group without run may be built apart from the state
@@ -109,8 +113,10 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	// The epoch for the exporter: with rewrite-timestamp it clamps the
 	// file times in the layers to it. The base layers stay as they are;
 	// the base config tells the exporter which ones they are.
-	out.AddMeta(commonexptypes.ExporterEpochKey, []byte(strconv.FormatInt(epoch, 10)))
-	out.AddMeta(exptypes.ExporterImageBaseConfigKey, base)
+	if epoch != nil {
+		out.AddMeta(commonexptypes.ExporterEpochKey, []byte(strconv.FormatInt(*epoch, 10)))
+		out.AddMeta(exptypes.ExporterImageBaseConfigKey, base)
+	}
 	out.SetRef(ref)
 	return out, nil
 }
