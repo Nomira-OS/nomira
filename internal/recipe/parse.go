@@ -282,7 +282,28 @@ type rawGroup struct {
 	key        *yaml.Node
 	commands   []string
 	contribute map[string][]string
-	collect    string
+	collect    string            // collect: run …
+	fan        map[string]string // collect: {resolve, each, then}
+}
+
+func (g *rawGroup) isCollector() bool { return g.collect != "" || g.fan != nil }
+
+// collectValue decodes the value of collect: a run command, or the
+// mapping of a collector that fans out.
+func (d *decoder) collectValue(k, v *yaml.Node, where string, g *rawGroup) error {
+	if v.Kind != yaml.MappingNode {
+		return d.decode(k, v, where, &g.collect)
+	}
+	if err := d.keys(v, k, where, "resolve", "each", "then"); err != nil {
+		return err
+	}
+	if err := d.decode(k, v, where, &g.fan); err != nil {
+		return err
+	}
+	if g.fan["resolve"] == "" || g.fan["each"] == "" {
+		return errf("%s: %s: resolve and each are required", d.at(k), where)
+	}
+	return nil
 }
 
 // build decodes the phases. A phase is a mapping of groups, with env as
@@ -325,7 +346,7 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 				if ck.Value == keyEnv {
 					return d.decode(ck, cv, where+".env", &rp.env)
 				}
-				return d.decode(ck, cv, where+".collect", &g.collect)
+				return d.collectValue(ck, cv, where+".collect", g)
 			})
 			if err != nil {
 				return err
@@ -347,7 +368,7 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 			if err != nil {
 				return err
 			}
-			if g.collect != "" {
+			if g.isCollector() {
 				if prev, ok := collectors[gk.Value]; ok {
 					return errf("%s: a collector %q is already defined at %s", d.at(gk), gk.Value, d.at(prev))
 				}
@@ -392,7 +413,7 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 		for _, gname := range rp.order {
 			rg := rp.groups[gname]
 			where := fmt.Sprintf("%s: build.%s.%s", d.at(rg.key), ph.Name, gname)
-			if gname == ph.Name && rg.collect != "" {
+			if gname == ph.Name && rg.isCollector() {
 				where = fmt.Sprintf("%s: build.%s", d.at(rg.key), ph.Name)
 			}
 			grp := Group{}
@@ -414,6 +435,38 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 				}
 				run = resolved.(RunCmd)
 				grp.Collect = &run
+			}
+			if rg.fan != nil {
+				fan := &Fanout{}
+				for _, part := range []struct {
+					key string
+					dst *RunCmd
+				}{{"resolve", &fan.Resolve}, {"each", &fan.Each}, {"then", &fan.Then}} {
+					line := rg.fan[part.key]
+					if line == "" {
+						continue
+					}
+					if part.key == "resolve" && !strings.Contains(line, itemsRef) {
+						return errf("%s: collect.resolve must contain %s", where, itemsRef)
+					}
+					if part.key != "resolve" && strings.Contains(line, itemsRef) {
+						return errf("%s: collect.%s: %s is only for resolve", where, part.key, itemsRef)
+					}
+					cmd, err := ParseCommand(line)
+					if err != nil {
+						return errf("%s: collect.%s: %w", where, part.key, err)
+					}
+					run, ok := cmd.(RunCmd)
+					if !ok {
+						return errf("%s: collect.%s must be a run command", where, part.key)
+					}
+					resolved, err := resolveSources(run, resolve)
+					if err != nil {
+						return errf("%s: collect.%s: %w", where, part.key, err)
+					}
+					*part.dst = resolved.(RunCmd)
+				}
+				grp.Fanout = fan
 			}
 			for i, line := range rg.commands {
 				cmd, err := ParseCommand(line)
@@ -452,12 +505,19 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 	// the cache key, does not depend on the order of groups or files.
 	for pi := range r.Phases {
 		for gname, grp := range r.Phases[pi].Groups {
-			if grp.Collect == nil {
+			if grp.Collect == nil && grp.Fanout == nil {
 				continue
 			}
 			list := sortedKeys(items[gname])
 			grp.Items = list
-			if len(list) > 0 {
+			if grp.Fanout != nil {
+				if len(list) > 0 {
+					f := *grp.Fanout
+					f.Resolve.Script = strings.ReplaceAll(f.Resolve.Script, itemsRef, strings.Join(list, " "))
+					f.Resolve.raw = strings.ReplaceAll(f.Resolve.raw, itemsRef, strings.Join(list, " "))
+					grp.Fanout = &f
+				}
+			} else if len(list) > 0 {
 				run := *grp.Collect
 				run.Script = strings.ReplaceAll(run.Script, itemsRef, strings.Join(list, " "))
 				run.raw = strings.ReplaceAll(run.raw, itemsRef, strings.Join(list, " "))
@@ -499,7 +559,7 @@ func (d *decoder) group(k, v *yaml.Node, where string) (*rawGroup, error) {
 		case "commands":
 			return d.decode(gk, gv, where+".commands", &g.commands)
 		case keyCollect:
-			return d.decode(gk, gv, where+".collect", &g.collect)
+			return d.collectValue(gk, gv, where+".collect", g)
 		case keyEnv:
 			return errf("%s: %s: env is a key of the phase; in a group use the env command", d.at(gk), where)
 		}
@@ -516,10 +576,10 @@ func (d *decoder) group(k, v *yaml.Node, where string) (*rawGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	if g.collect != "" && (len(g.commands) > 0 || len(g.contribute) > 0) {
+	if g.isCollector() && (len(g.commands) > 0 || len(g.contribute) > 0) {
 		return nil, errf("%s: %s: a collector has collect and nothing else", d.at(k), where)
 	}
-	if g.collect == "" && len(g.commands) == 0 && len(g.contribute) == 0 {
+	if !g.isCollector() && len(g.commands) == 0 && len(g.contribute) == 0 {
 		return nil, errf("%s: %s: needs commands, collect or a contribution to a collector", d.at(k), where)
 	}
 	return g, nil

@@ -565,3 +565,39 @@ func TestExamples(t *testing.T) {
 		t.Errorf("phases: %+v", r.Phases)
 	}
 }
+
+func TestFanoutCollector(t *testing.T) {
+	r := parse(t, `
+settings: {base: x}
+build:
+  packages:
+    collect:
+      resolve: run pacman -Sp ${items}
+      each: run pacman --root /nomira/out -U /nomira/in/*
+      then: run pacman -U /nomira/in/*
+  features:
+    a: {packages: [vim, curl]}
+`)
+	g := r.Phases[0].Groups["packages"]
+	if g.Fanout == nil || !g.IsCollector() || !g.HasRun() || !g.Builds() {
+		t.Fatalf("group: %+v", g)
+	}
+	if g.Fanout.Resolve.Script != "pacman -Sp curl vim" || g.Fanout.Each.Script == "" || g.Fanout.Then.Script == "" || len(g.Commands) != 0 {
+		t.Errorf("fanout: %+v", g.Fanout)
+	}
+	none := parse(t, "settings: {base: x}\nbuild: {p: {collect: {resolve: 'run r ${items}', each: 'run e'}}}\n")
+	if none.Phases[0].Groups["p"].Builds() {
+		t.Error("a collector without items builds nothing")
+	}
+	for name, src := range map[string]string{
+		"no each":       "settings: {base: x}\nbuild: {p: {collect: {resolve: 'run r ${items}'}}}\n",
+		"no items":      "settings: {base: x}\nbuild: {p: {collect: {resolve: 'run r', each: 'run e'}}}\n",
+		"items in each": "settings: {base: x}\nbuild: {p: {collect: {resolve: 'run r ${items}', each: 'run e ${items}'}}}\n",
+		"unknown key":   "settings: {base: x}\nbuild: {p: {collect: {resolve: 'run r ${items}', each: 'run e', after: 'run a'}}}\n",
+		"not a run":     "settings: {base: x}\nbuild: {p: {collect: {resolve: 'run r ${items}', each: 'copy a /b'}}}\n",
+	} {
+		if _, err := Parse([]byte(src)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

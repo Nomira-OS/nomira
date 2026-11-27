@@ -34,6 +34,7 @@ const (
 	keyResolveMode  = "image-resolve-mode"
 	keyMode         = "mode"
 	keyToolbox      = "toolbox"
+	keyCheck        = "check"
 
 	// DefaultToolbox is the image the checks run in: busybox's find, sort,
 	// comm, sed, sha256sum and stat. Tests set another with the option
@@ -68,6 +69,16 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	toolbox := opts[keyToolbox]
 	if toolbox == "" {
 		toolbox = DefaultToolbox
+	}
+	// check=off skips the conflict checks: between the groups of a phase
+	// and between the buckets of a collector that fans out.
+	check := true
+	switch opts[keyCheck] {
+	case "", "on":
+	case "off":
+		check = false
+	default:
+		return nil, fmt.Errorf("check %q: expected on or off", opts[keyCheck])
 	}
 
 	r, err := recipe.ParseFile(filename, read)
@@ -107,10 +118,19 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 			return dependent(ctx, c, r, toolbox, ph, lower, alone)
 		},
 		PhaseDone: func(plan compile.PhasePlan) error {
-			if !plan.Validate {
+			if !plan.Validate || !check {
 				return nil
 			}
 			return checkConflicts(ctx, c, r, toolbox, plan)
+		},
+		Resolve: func(st llb.State) ([]byte, error) {
+			return solveAndRead(ctx, c, st, compile.FanoutList)
+		},
+		CheckBuckets: func(scope string, buckets map[string]llb.State) error {
+			if !check {
+				return nil
+			}
+			return checkBuckets(ctx, c, toolbox, scope, buckets)
 		},
 	})
 	if err != nil {
@@ -297,6 +317,37 @@ func solveAndRead(ctx context.Context, c client.Client, st llb.State, filename s
 // two passes (see package conflict): every group's write set, in
 // parallel; then, for the paths that more than one group writes, their
 // content and metadata.
+// checkBuckets checks that no file is in two buckets of a collector that
+// fans out: pass 1 of the conflict check, strictly, since a file of two
+// packages is a conflict even when it is the same.
+func checkBuckets(ctx context.Context, c client.Client, toolbox, scope string, buckets map[string]llb.State) error {
+	var mu sync.Mutex
+	sets := map[string][]conflict.Entry{}
+	eg, ectx := errgroup.WithContext(ctx)
+	for name, layer := range buckets {
+		name, layer := name, layer
+		eg.Go(func() error {
+			st := compile.WriteSetState(toolbox, nil, nil, layer, scope, name)
+			data, err := solveAndRead(ectx, c, st, compile.WritesPath)
+			if err != nil {
+				return fmt.Errorf("%s %s: collect write set: %w", scope, name, err)
+			}
+			entries, err := conflict.ParseWriteSet(string(data))
+			if err != nil {
+				return fmt.Errorf("%s %s: %w", scope, name, err)
+			}
+			mu.Lock()
+			sets[name] = entries
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return err
+	}
+	return conflict.CheckStrict(scope, sets)
+}
+
 func checkConflicts(ctx context.Context, c client.Client, r *recipe.Recipe, toolbox string, plan compile.PhasePlan) error {
 	name := plan.Phase.Name
 	tag := compile.PhaseTag(r, phaseIndex(r, name))

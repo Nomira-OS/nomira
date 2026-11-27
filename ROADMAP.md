@@ -29,7 +29,8 @@ The plan, in steps that each stand on their own:
 2. **Initramfs only when its inputs change**: done in arch-base
    (`/usr/lib/nomira/initramfs`, `recipes/initramfs.yml`); to be tried
    in a real build.
-3. **Collectors that fan out** (frontend, generic). A collector with
+3. **Collectors that fan out**: in the frontend and in arch-base's
+   `packages.yml`; to be measured in a real build. The design: A collector with
    `resolve`, `each` and `then`, without a tool image of its own:
    `resolve` runs on the state before the phase and prints the files to
    fetch (name, URL, sha256); BuildKit downloads them, cached by URL and
@@ -72,7 +73,7 @@ well. Later: the number of buckets configurable, and more distribution
 logics as options: xattrs in the manner of chunkah's `user.component`,
 packages above a size of their own, frequency hints.
 
-The conflict check as a build option (`--opt check=off`, `nomira build
+Done: the conflict check as a build option (`--opt check=off`, `nomira build
 --no-check`), on by default: faster builds for who accepts that groups
 or buckets that overlap are merged in a fixed order without a word.
 

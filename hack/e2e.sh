@@ -47,6 +47,7 @@ build() {
     --local context="$d" --local dockerfile="$d" \
     --opt filename=recipe.yml ${TOOLBOX:+--opt toolbox="$TOOLBOX"} \
     ${BUILD_SECRET:+--secret "$BUILD_SECRET"} ${MODE:+--opt mode="$MODE"} \
+    ${CHECK:+--opt check="$CHECK"} \
     --output type=local,dest="$d/out" \
     --progress=plain > "$d/log" 2>&1
 }
@@ -331,6 +332,9 @@ EOF
   must_fail conflict_write 'groups "a" and "b": /etc/a (both write, with different content, mode or owner)'
   logged conflict_write 'its groups are not independent'
   logged conflict_write 'hash 1 shared paths'
+  # check=off merges in the fixed order of the groups, without a word.
+  CHECK=off must_build conflict_write || return 0
+  notlogged conflict_write 'write set'
 }
 
 case_conflict_delete() {
@@ -536,6 +540,67 @@ EOF
   must_fail url_mismatch 'digest'
 }
 
+# A collector that fans out: resolve prints the files, BuildKit fetches
+# them, each unpacks one bucket, then runs on all of it. Buckets depend on
+# the key alone: alpha is in bucket 43, beta and gamma share 18, delta is
+# in 17 (see compile.Bucket). A changed file reruns only its bucket.
+fan_pkg() { # <name> <content> [<extra path>]: a tar served over http
+  dir="$work/fanpkg/$1"; rm -rf "$dir"; mkdir -p "$dir/usr/share/fan"
+  echo "$2" > "$dir/usr/share/fan/$1"
+  [ -z "${3:-}" ] || { mkdir -p "$dir/$(dirname "$3")"; echo "$1" > "$dir/$3"; }
+  (cd "$dir" && tar -cf "$HTTP_DIR/fan/$1.tar" usr)
+  echo "$1 $HTTP_URL/fan/$1.tar sha256:$(sha256sum "$HTTP_DIR/fan/$1.tar" | cut -d' ' -f1)"
+}
+case_fanout() {
+  if [ -z "${HTTP_DIR:-}" ] || [ -z "${HTTP_URL:-}" ]; then
+    echo "    skipped: set HTTP_DIR and HTTP_URL"
+    return 0
+  fi
+  mkdir -p "$HTTP_DIR/fan"
+  recipe fanout <<EOF
+stages:
+  list:
+    from: ${BASE}
+    commands: ["copy files/fanlist /fanlist"]
+build:
+  packages:
+    collect:
+      resolve: run --mount=type=bind,from=list,target=/l for i in \${items}; do grep "^\$i " /l/fanlist; done
+      each: run for f in /nomira/in/*; do tar -xf "\$f" -C /nomira/out; done
+      then: run ls /nomira/in > /etc/fan-then && cat /usr/share/fan/* > /etc/fan-all
+  features:
+    a: {packages: [alpha, beta, gamma, delta]}
+EOF
+  { fan_pkg alpha 1; fan_pkg beta 1; fan_pkg gamma 1; fan_pkg delta 1; } > "$work/fanout/files/fanlist"
+  must_build fanout || return 0
+  has fanout usr/share/fan/alpha 1
+  has fanout usr/share/fan/gamma 1
+  has fanout etc/fan-then "alpha.tar
+beta.tar
+delta.tar
+gamma.tar"
+  logged fanout 'each bucket 18: beta gamma'
+  logged fanout 'merge 3 buckets'
+  # delta changes: only its bucket is unpacked again.
+  { grep -v '^delta ' "$work/fanout/files/fanlist"; fan_pkg delta 2; } > "$work/fanout/list.new"
+  mv "$work/fanout/list.new" "$work/fanout/files/fanlist"
+  must_build fanout || return 0
+  has fanout usr/share/fan/delta 2
+  cached fanout 'each bucket 43: alpha'
+  cached fanout 'each bucket 18: beta gamma'
+  notcached fanout 'each bucket 17: delta'
+
+  # A file in two buckets is a conflict, unless the check is off.
+  mkdir -p "$work/fanout_conflict/files"
+  cp "$work/fanout/recipe.yml" "$work/fanout_conflict/recipe.yml"
+  { fan_pkg alpha 1 usr/share/same; fan_pkg delta 1 usr/share/same; } > "$work/fanout_conflict/files/fanlist"
+  sed -i 's/packages: \[alpha, beta, gamma, delta\]/packages: [alpha, delta]/' "$work/fanout_conflict/recipe.yml"
+  must_fail fanout_conflict 'files in more than one bucket'
+  logged fanout_conflict '/usr/share/same (bucket 17, bucket 43)'
+  CHECK=off must_build fanout_conflict || return 0
+  has fanout_conflict usr/share/fan/alpha 1
+}
+
 # lint parses the recipe and stops: nothing is built.
 case_lint() {
   recipe lint <<'EOF'
@@ -657,7 +722,7 @@ EOF
 
 all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_isolated
 delete_alone_is_fine identical rewrite_counts_as_write serial_phases
-collectors long_form_and_imports url_import lint independent_of_base
+collectors long_form_and_imports url_import fanout lint independent_of_base
 fallback_symlink fallback_mode fallback_type isolated_single_group tmpfs_mount
 context_excludes_output uki secret_mount record source_date_epoch mounts"
 

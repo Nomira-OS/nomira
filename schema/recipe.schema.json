@@ -91,9 +91,24 @@
       }
     },
     "collect": {
-      "description": "A run command with ${items}: what all groups contribute under the collector's name.",
-      "type": "string",
-      "pattern": "^\\s*run\\s.*\\$\\{items\\}"
+      "anyOf": [
+        {
+          "description": "A run command with ${items}: what all groups contribute under the collector's name.",
+          "type": "string",
+          "pattern": "^\\s*run\\s.*\\$\\{items\\}"
+        },
+        {
+          "description": "A collector that fans out: resolve prints the files to fetch, each unpacks one bucket of them, then finishes on the merged result.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resolve", "each"],
+          "properties": {
+            "resolve": {"type": "string", "pattern": "^\\s*run\\s.*\\$\\{items\\}"},
+            "each": {"type": "string", "pattern": "^\\s*run\\s"},
+            "then": {"type": "string", "pattern": "^\\s*run\\s"}
+          }
+        }
+      ]
     },
     "phase": {
       "description": "A phase: its groups by name and its env; or, with collect, a single collector named after the phase.",

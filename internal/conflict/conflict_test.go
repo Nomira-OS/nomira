@@ -109,3 +109,13 @@ func TestParse(t *testing.T) {
 		t.Error("malformed hash line should fail")
 	}
 }
+
+func TestCheckStrict(t *testing.T) {
+	if err := CheckStrict("p", map[string][]Entry{"b1": ws(t, "W usr/a\n"), "b2": ws(t, "W usr/b\n")}); err != nil {
+		t.Fatal(err)
+	}
+	err := CheckStrict("p", map[string][]Entry{"b1": ws(t, "W usr/a\n"), "b2": ws(t, "W usr/a\n")})
+	if err == nil || !strings.Contains(err.Error(), "/usr/a (b1, b2)") {
+		t.Errorf("same file in two buckets: %v", err)
+	}
+}

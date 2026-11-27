@@ -227,3 +227,39 @@ func verb(k Kind) string {
 	}
 	return "?"
 }
+
+// CheckStrict reports every path that more than one set writes, whatever
+// its content: for the buckets of a collector that fans out, where a file
+// of two packages is a conflict even when it is the same.
+func CheckStrict(scope string, sets map[string][]Entry) error {
+	owners := map[string][]string{}
+	for name, set := range sets {
+		for _, e := range set {
+			if e.Kind == Write {
+				owners[e.Path] = append(owners[e.Path], name)
+			}
+		}
+	}
+	var paths []string
+	for p, o := range owners {
+		if len(o) > 1 {
+			sort.Strings(o)
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.Strings(paths)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s: files in more than one bucket:\n", scope)
+	for k, p := range paths {
+		if k == 20 {
+			fmt.Fprintf(&b, "  … and %d more\n", len(paths)-k)
+			break
+		}
+		fmt.Fprintf(&b, "  /%s (%s)\n", p, strings.Join(owners[p], ", "))
+	}
+	b.WriteString("  fix: two of the files resolve printed contain the same path")
+	return fmt.Errorf("%s", b.String())
+}

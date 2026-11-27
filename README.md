@@ -278,6 +278,51 @@ A collector runs as one step: when one item changes, the whole command
 runs again. Use it where that is the nature of the operation, or where
 the command is quick.
 
+### Collectors that fan out
+
+Installing packages is the case where one step costs most: one new
+package, and all of them are unpacked again into one new, large layer.
+A collector can instead fan out, in three commands:
+
+```yaml
+build:
+  packages:
+    collect:
+      resolve: run pacman -Sp --needed --print-format '%n %l sha256:%h %e' ${items}
+      each: run pacman --root /nomira/out --dbpath /tmp/db -U --noconfirm --nodeps --noscriptlet /nomira/in/*
+      then: run pacman -U --noconfirm --overwrite '*' … /nomira/in/*
+```
+
+```
+S ─ resolve ─→ list of files
+       fetch ×n (BuildKit, by checksum, parallel)
+S ─ each(bucket 1) ─→ /nomira/out ┐
+S ─ each(bucket 2) ─→ /nomira/out ├─ parallel, cached one by one
+S ─ each(bucket k) ─→ /nomira/out ┘   (check: no file in two buckets)
+Merge(S, buckets…) ─ then ─→ result of the collector
+```
+
+- **resolve** runs on the state the phase starts from, with the items,
+  and prints one line per file to fetch: name, URL, `sha256:<hex>`, and
+  optionally a key (default: the name). The frontend reads the list, so
+  everything after it waits for it.
+- **fetch:** BuildKit downloads every file itself, checked against its
+  checksum and cached by it, shared by every build.
+- **each** runs once per bucket on the same state, with the bucket's
+  files in `/nomira/in`; what it writes to `/nomira/out` is the bucket's
+  layer. A file's bucket depends on its key alone (rendezvous hashing
+  over 64 buckets): adding or removing a file changes only its own
+  bucket, and an unchanged bucket is neither run nor exported again. A
+  key shared by files that change together, a source package for one,
+  keeps them in one bucket.
+- **Buckets must not overlap:** a file in two buckets is a conflict,
+  even when it is the same, and stops the build.
+- **then** runs on the merged result with all files in `/nomira/in`, to
+  finish: a package database, install scripts, hooks. Optional.
+
+The frontend knows no package manager: what the three commands do is up
+to the recipe, and a base image can offer them as a part to import.
+
 ## The conflict check
 
 Merging the layers of a phase's groups must give what running them one
@@ -474,6 +519,7 @@ Options the frontend takes (`--opt`):
 | `mode` | `build` (default); `lint` only parses the recipe and its imports; `resolve` outputs the recipe with all imports merged as `recipe.yml`. lint and resolve also output `version`; use them with `--output type=local,dest=DIR` |
 | `image-resolve-mode` | `default`, `pull` or `local`, as the Dockerfile frontend takes it, for the base image and stages |
 | `toolbox` | The busybox image the checks run in; default `docker.io/library/busybox:1.38.0` |
+| `check` | `on` (default) or `off`: the conflict checks between groups and between buckets. Off is faster and merges overlapping groups in a fixed order without a word |
 
 The result is an ordinary OCI image, for podman for instance:
 

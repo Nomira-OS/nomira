@@ -77,6 +77,13 @@ type Hooks struct {
 	// compiled on top of it. An error stops the compilation, so a conflict
 	// is reported before anything builds on the merged result.
 	PhaseDone func(plan PhasePlan) error
+	// Resolve solves the resolve step of a collector that fans out and
+	// returns the file FanoutList in st. Required for such collectors.
+	Resolve func(st llb.State) ([]byte, error)
+	// CheckBuckets is shown the buckets of a collector that fans out,
+	// by name, before then runs on them; an error stops the build.
+	// Optional: without it the buckets are not checked.
+	CheckBuckets func(scope string, buckets map[string]llb.State) error
 }
 
 // ContextExcludes are never sent from the recipe directory.
@@ -165,6 +172,14 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 					scope += ", WARNING: not independent of earlier state: " + reason
 				}
 			}
+			if f := ph.Groups[g].Fanout; f != nil {
+				upper, err := fanout(cur, f, env, sources, scope, mounts, hooks)
+				if err != nil {
+					return nil, err
+				}
+				plan.Uppers[g] = upper
+				continue
+			}
 			upper, err := applyCommands(cur, ph.Groups[g].Commands, mergeEnv(env), ctxSrc, sources, scope, mounts)
 			if err != nil {
 				return nil, err
@@ -251,68 +266,9 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 			env[cmd.Name] = cmd.Value
 
 		case recipe.RunCmd:
-			opts := []llb.RunOption{
-				llb.Args([]string{"/bin/sh", "-c", cmd.Script}),
-				llb.Dir("/"),
-				llb.WithCustomNamef("[%s] run %s", scope, firstLine(cmd.Script)),
-			}
-			own := map[string]bool{}
-			for _, m := range cmd.Mounts {
-				own[path.Clean(m.Target)] = true
-			}
-			var all []recipe.Mount
-			for _, m := range defaults {
-				if !own[m.Target] {
-					all = append(all, m)
-				}
-			}
-			all = append(all, cmd.Mounts...)
-			for _, m := range all {
-				if m.Type == "tmpfs" {
-					opts = append(opts, llb.AddMount(m.Target, llb.Scratch(), llb.Tmpfs()))
-					continue
-				}
-				if m.Type == "secret" {
-					// Provided by the client (buildctl --secret); never part
-					// of a layer or of the cache key.
-					sopts := []llb.SecretOption{llb.SecretID(m.ID)}
-					if !m.Required {
-						sopts = append(sopts, llb.SecretOptional)
-					}
-					opts = append(opts, llb.AddSecret(m.Target, sopts...))
-					continue
-				}
-				if m.Type == "bind" {
-					src, ok := stages[m.From]
-					if !ok {
-						return st, fmt.Errorf("%s: --mount from=%s: no such stage or phase", scope, m.From)
-					}
-					// No content-based cache key: BuildKit would checksum every file
-					// of the mounted tree, a whole system for a UKI, on every build
-					// in which it changed. Its LLB definition identifies it as well.
-					opts = append(opts, llb.AddMount(m.Target, src, llb.SourcePath(m.Source), llb.Readonly, noContentCache))
-					continue
-				}
-				sharing := llb.CacheMountShared
-				switch m.Sharing {
-				case "private":
-					sharing = llb.CacheMountPrivate
-				case "locked":
-					sharing = llb.CacheMountLocked
-				}
-				opts = append(opts, llb.AddMount(m.Target, llb.Scratch(),
-					llb.AsPersistentCacheDir(m.ID, sharing)))
-			}
-			names := make([]string, 0, len(env))
-			for k := range env {
-				names = append(names, k)
-			}
-			sort.Strings(names)
-			for _, k := range names {
-				opts = append(opts, llb.AddEnv(k, env[k]))
-			}
-			if cmd.NoCache {
-				opts = append(opts, llb.IgnoreCache)
+			opts, err := runOptions(cmd, env, stages, scope, defaults)
+			if err != nil {
+				return st, err
 			}
 			st = st.Run(opts...).Root()
 
@@ -355,6 +311,75 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 		}
 	}
 	return st, nil
+}
+
+// runOptions are the options of one run: the command, its mounts (and
+// those of settings.mounts it does not mount itself), its environment.
+func runOptions(cmd recipe.RunCmd, env map[string]string, stages map[string]llb.State, scope string, defaults []recipe.Mount) ([]llb.RunOption, error) {
+	opts := []llb.RunOption{
+		llb.Args([]string{"/bin/sh", "-c", cmd.Script}),
+		llb.Dir("/"),
+		llb.WithCustomNamef("[%s] run %s", scope, firstLine(cmd.Script)),
+	}
+	own := map[string]bool{}
+	for _, m := range cmd.Mounts {
+		own[path.Clean(m.Target)] = true
+	}
+	var all []recipe.Mount
+	for _, m := range defaults {
+		if !own[m.Target] {
+			all = append(all, m)
+		}
+	}
+	all = append(all, cmd.Mounts...)
+	for _, m := range all {
+		if m.Type == "tmpfs" {
+			opts = append(opts, llb.AddMount(m.Target, llb.Scratch(), llb.Tmpfs()))
+			continue
+		}
+		if m.Type == "secret" {
+			// Provided by the client (buildctl --secret); never part
+			// of a layer or of the cache key.
+			sopts := []llb.SecretOption{llb.SecretID(m.ID)}
+			if !m.Required {
+				sopts = append(sopts, llb.SecretOptional)
+			}
+			opts = append(opts, llb.AddSecret(m.Target, sopts...))
+			continue
+		}
+		if m.Type == "bind" {
+			src, ok := stages[m.From]
+			if !ok {
+				return nil, fmt.Errorf("%s: --mount from=%s: no such stage or phase", scope, m.From)
+			}
+			// No content-based cache key: BuildKit would checksum every file
+			// of the mounted tree, a whole system for a UKI, on every build
+			// in which it changed. Its LLB definition identifies it as well.
+			opts = append(opts, llb.AddMount(m.Target, src, llb.SourcePath(m.Source), llb.Readonly, noContentCache))
+			continue
+		}
+		sharing := llb.CacheMountShared
+		switch m.Sharing {
+		case "private":
+			sharing = llb.CacheMountPrivate
+		case "locked":
+			sharing = llb.CacheMountLocked
+		}
+		opts = append(opts, llb.AddMount(m.Target, llb.Scratch(),
+			llb.AsPersistentCacheDir(m.ID, sharing)))
+	}
+	names := make([]string, 0, len(env))
+	for k := range env {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		opts = append(opts, llb.AddEnv(k, env[k]))
+	}
+	if cmd.NoCache {
+		opts = append(opts, llb.IgnoreCache)
+	}
+	return opts, nil
 }
 
 // PhaseTag names phase i in step names: its position and name, "2/6

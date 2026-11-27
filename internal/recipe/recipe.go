@@ -95,6 +95,20 @@ type Group struct {
 	// nothing when there are no items.
 	Collect *RunCmd
 	Items   []string
+	// Fanout is set for a collector that fans out instead of Collect.
+	Fanout *Fanout
+}
+
+// Fanout is a collector that fans out (collect: {resolve, each, then}).
+// Resolve, with the items filled in, prints one line per file to fetch:
+// name, URL, sha256:<hex>, and optionally a key for the distribution into
+// buckets (default: the name). The frontend downloads the files, runs
+// Each once per bucket with its files in /nomira/in and its result in
+// /nomira/out, merges the results, and runs Then on the merged system
+// with all files in /nomira/in. All of them run on the state the phase
+// starts from, as any group does.
+type Fanout struct {
+	Resolve, Each, Then RunCmd
 }
 
 // HasRun reports whether the group executes anything. A group without run
@@ -102,6 +116,9 @@ type Group struct {
 // state: the compiler builds it on an empty state when that is provably
 // equivalent (see compile.Hooks.Decide).
 func (g Group) HasRun() bool {
+	if g.Fanout != nil {
+		return true
+	}
 	for _, c := range g.Commands {
 		if _, ok := c.(RunCmd); ok {
 			return true
@@ -111,7 +128,13 @@ func (g Group) HasRun() bool {
 }
 
 // IsCollector reports whether the group is a collector.
-func (g Group) IsCollector() bool { return g.Collect != nil }
+func (g Group) IsCollector() bool { return g.Collect != nil || g.Fanout != nil }
+
+// Builds reports whether the group produces anything: it has commands,
+// or it is a collector that fans out and has items.
+func (g Group) Builds() bool {
+	return len(g.Commands) > 0 || (g.Fanout != nil && len(g.Items) > 0)
+}
 
 // Phase is one serial pipeline step: groups that are independent of each
 // other, any of them may be a collector.
@@ -147,7 +170,7 @@ func (p Phase) GroupNames() []string {
 func (p Phase) BuildGroupNames() []string {
 	var names []string
 	for _, n := range p.GroupNames() {
-		if len(p.Groups[n].Commands) > 0 {
+		if p.Groups[n].Builds() {
 			names = append(names, n)
 		}
 	}

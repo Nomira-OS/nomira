@@ -25,7 +25,8 @@ Sibling repositories in the Nomira-OS organization:
 
 - `internal/recipe`: schema, parser, merging of `imports`. No BuildKit imports.
 - `internal/conflict`: the conflict check. Pure, no BuildKit imports.
-- `internal/compile`: recipe to LLB; `lister.sh` lists a group's writes and
+- `internal/compile`: recipe to LLB; `fanout.go` the collectors that fan
+  out (buckets, fetch, each, then); `lister.sh` lists a group's writes and
   deletions (pass 1), `hash.sh` hashes the paths several groups write
   (pass 2), `guard.sh` decides whether a group without `run` may be built
   apart from the state before it.
