@@ -28,6 +28,9 @@ import (
 const (
 	// LocalContext is the name of the build-context local source.
 	LocalContext = "context"
+	// LocalRecipe is the local source with the recipe's own files
+	// (BuildKit's name for the frontend's file).
+	LocalRecipe = "dockerfile"
 	defaultPath  = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
@@ -85,13 +88,20 @@ var ContextExcludes = []string{".nomira"}
 func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	b := &Build{Recipe: r, Stages: map[string]llb.State{}}
 
+	// Only what the copy commands name is loaded from the build context.
 	// .nomira holds the CLI's build output next to the recipe: images of
 	// a gigabyte and more that no recipe copies from.
-	ctxSrc := llb.Local(LocalContext,
-		llb.WithCustomName("[context] load build context"),
+	ctxPaths, ctxAll := r.ContextPaths()
+	ctxOpts := []llb.LocalOption{
+		llb.WithCustomName("[context] load " + describePaths(ctxPaths, ctxAll)),
 		llb.SharedKeyHint(LocalContext),
 		llb.ExcludePatterns(ContextExcludes),
-	)
+	}
+	if !ctxAll {
+		ctxOpts = append(ctxOpts, llb.IncludePatterns(ctxPaths))
+	}
+	ctxSrc := llb.Local(LocalContext, ctxOpts...)
+	recordAfter := r.RecordPhase()
 
 	// Prepare stages, global and group-local alike. BuildKit builds a stage
 	// when something copies from it; the order here does not matter.
@@ -209,6 +219,9 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			}
 		}
 		cur = plan.Output
+		if len(b.Phases) == recordAfter {
+			cur = record(cur, r, ctxSrc, len(ctxPaths) > 0 || ctxAll)
+		}
 		sources[ph.Name] = cur
 		for name, st := range r.Prepare {
 			if st.FromPhase != ph.Name {
@@ -223,6 +236,43 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	}
 	b.Final = cur
 	return b, nil
+}
+
+// record adds the recipe to the image, below recipe.RecordDir: its own
+// files from the recipe source, and what its copy commands take from the
+// build context. Owner root, so the record is the same whoever builds it.
+func record(st llb.State, r *recipe.Recipe, ctxSrc llb.State, withContext bool) llb.State {
+	files := llb.Local(LocalRecipe,
+		llb.IncludePatterns(r.Files),
+		llb.ExcludePatterns(ContextExcludes),
+		llb.WithCustomName("[record] load "+strings.Join(r.Files, " ")),
+	)
+	info := func() *llb.CopyInfo {
+		return &llb.CopyInfo{
+			CreateDestPath:      true,
+			CopyDirContentsOnly: true,
+			ChownOpt: &llb.ChownOpt{
+				User:  &llb.UserOpt{UID: 0},
+				Group: &llb.UserOpt{UID: 0},
+			},
+		}
+	}
+	fa := llb.Copy(files, "/", recipe.RecordDir+"/", info())
+	if withContext {
+		fa = fa.Copy(ctxSrc, "/", recipe.RecordDir+"/", info())
+	}
+	return st.File(fa, llb.WithCustomName("[record] recipe -> "+recipe.RecordDir))
+}
+
+// describePaths names what is loaded from the build context.
+func describePaths(paths []string, all bool) string {
+	switch {
+	case all:
+		return "build context"
+	case len(paths) == 0:
+		return "build context (nothing)"
+	}
+	return strings.Join(paths, " ")
 }
 
 func baseState(ref, name string) llb.State {

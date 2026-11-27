@@ -33,6 +33,7 @@ package recipe
 
 import (
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 )
@@ -52,6 +53,107 @@ type Recipe struct {
 	Settings Settings
 	Prepare  map[string]Stage // named multistage stages, referenced by `copy --from=<name>`
 	Phases   []Phase
+	// Files are the recipe's own files, entry first, then every included
+	// file once, as paths relative to the recipe directory.
+	Files []string
+}
+
+// RecordPhase returns the index of the phase after which the record is
+// added, or -1 when settings.record is false. By default the record comes
+// right before the first phase that reads the result of an earlier phase
+// (a bind mount or copy from it, or a prepare stage that starts from it):
+// such a phase derives something from the image so far, a unified kernel
+// image with its digest for instance, which must already cover the
+// record. Without such a phase the record comes last.
+func (r *Recipe) RecordPhase() int {
+	if r.Settings.Record.Off {
+		return -1
+	}
+	if a := r.Settings.Record.After; a != "" {
+		for i, ph := range r.Phases {
+			if ph.Name == a {
+				return i
+			}
+		}
+	}
+	for i := 1; i < len(r.Phases); i++ {
+		if r.readsEarlierPhase(i) {
+			return i - 1
+		}
+	}
+	return len(r.Phases) - 1
+}
+
+func (r *Recipe) readsEarlierPhase(i int) bool {
+	earlier := map[string]bool{}
+	for _, ph := range r.Phases[:i] {
+		earlier[ph.Name] = true
+	}
+	reads := func(from string) bool {
+		if earlier[from] {
+			return true
+		}
+		st, ok := r.Prepare[from]
+		return ok && st.FromPhase != ""
+	}
+	for _, c := range r.Phases[i].Commands() {
+		switch c := c.(type) {
+		case CopyCmd:
+			if c.From != "" && reads(c.From) {
+				return true
+			}
+		case RunCmd:
+			for _, m := range c.Mounts {
+				if m.Type == "bind" && reads(m.From) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ContextPaths returns what the copy commands of the recipe take from the
+// build context, as include patterns relative to it. all is true when a
+// copy takes the whole context.
+func (r *Recipe) ContextPaths() (paths []string, all bool) {
+	seen := map[string]bool{}
+	add := func(cmds []Command) {
+		for _, c := range cmds {
+			cc, ok := c.(CopyCmd)
+			if !ok || cc.From != "" {
+				continue
+			}
+			for _, src := range cc.Srcs {
+				p := path.Clean("/" + src)[1:]
+				if p == "" {
+					all = true
+					continue
+				}
+				if !seen[p] {
+					seen[p] = true
+					paths = append(paths, p)
+				}
+			}
+		}
+	}
+	for _, name := range sortedStageNames(r.Prepare) {
+		add(r.Prepare[name].Commands)
+	}
+	for _, ph := range r.Phases {
+		add(ph.Commands())
+	}
+	sort.Strings(paths)
+	return paths, all
+}
+
+func sortedStageNames(m map[string]Stage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Settings holds file-level configuration.
@@ -76,6 +178,26 @@ type Settings struct {
 	// They live in the recipe because they shape the result.
 	Compression string
 	Secrets     map[string]string
+	// SourceDateEpoch is the time, in seconds since 1970, that every run
+	// sees as SOURCE_DATE_EPOCH and to which the exported image clamps its
+	// timestamps. nil: the creation time of the base image.
+	SourceDateEpoch *int64
+	// Record says after which phase the recipe itself goes into the image,
+	// below RecordDir.
+	Record Record
+}
+
+// RecordDir is where the image keeps the recipe it was built from: the
+// recipe's files and everything its copy commands take from the build
+// context, at their paths relative to the recipe directory. It is below
+// /usr, so it is part of the verified, read-only image.
+const RecordDir = "/usr/share/nomira/recipe"
+
+// Record is settings.record: true (the default), false, or the name of
+// the phase after which the record is added.
+type Record struct {
+	Off   bool
+	After string
 }
 
 // Stage is a named prepare stage with its own base image.
@@ -126,6 +248,19 @@ type Phase struct {
 	// Collector phases only.
 	Collect *RunCmd  // the command with ${items} filled in
 	Items   []string // sorted, unique contributions
+}
+
+// Commands returns all commands of the phase: the collector's, or those
+// of its groups in the order of their names.
+func (p Phase) Commands() []Command {
+	var cmds []Command
+	if p.Collect != nil {
+		cmds = append(cmds, *p.Collect)
+	}
+	for _, g := range p.GroupNames() {
+		cmds = append(cmds, p.Groups[g].Commands...)
+	}
+	return cmds
 }
 
 // IsCollector reports whether the phase is a collector.

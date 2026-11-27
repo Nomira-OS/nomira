@@ -32,6 +32,35 @@ type rawSettings struct {
 	Tags        []string          `yaml:"tags"`
 	Compression string            `yaml:"compression"`
 	Secrets     map[string]string `yaml:"secrets"`
+
+	SourceDateEpoch *int64    `yaml:"source_date_epoch"`
+	Record          rawRecord `yaml:"record"`
+}
+
+// rawRecord is settings.record: a boolean or a phase name.
+type rawRecord struct {
+	Off   bool
+	After string
+}
+
+func (r *rawRecord) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		switch n.Tag {
+		case "!!bool":
+			var on bool
+			if err := n.Decode(&on); err != nil {
+				return err
+			}
+			r.Off = !on
+			return nil
+		case "!!str":
+			if n.Value != "" {
+				r.After = n.Value
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("line %d: settings.record: expected true, false or the name of a phase", n.Line)
 }
 
 type rawStage struct {
@@ -69,6 +98,19 @@ func Parse(data []byte, buildArgs map[string]string) (*Recipe, error) {
 // Include paths are relative to the including file.
 func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recipe, error) {
 	entry = path.Clean(entry)
+	// Every file the recipe consists of, for the record and so that the
+	// frontend loads nothing else.
+	var files []string
+	seenFile := map[string]bool{}
+	inner := read
+	read = func(name string) ([]byte, error) {
+		data, err := inner(name)
+		if err == nil && !seenFile[name] {
+			seenFile[name] = true
+			files = append(files, name)
+		}
+		return data, err
+	}
 	data, err := read(entry)
 	if err != nil {
 		return nil, errf("recipe: %w", err)
@@ -108,11 +150,20 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Tags:        raw.Settings.Tags,
 			Compression: raw.Settings.Compression,
 			Secrets:     expandMap(raw.Settings.Secrets, args),
+
+			SourceDateEpoch: raw.Settings.SourceDateEpoch,
+			Record:          Record{Off: raw.Settings.Record.Off, After: raw.Settings.Record.After},
 		},
 		Prepare: map[string]Stage{},
 	}
 	if err := checkEnvNames("settings.env", r.Settings.Env); err != nil {
 		return nil, err
+	}
+	if _, ok := r.Settings.Env[EpochVar]; ok {
+		return nil, errf("recipe: settings.env: set %s with settings.source_date_epoch", EpochVar)
+	}
+	if e := r.Settings.SourceDateEpoch; e != nil && *e < 0 {
+		return nil, errf("recipe: settings.source_date_epoch: %d is before 1970", *e)
 	}
 	for _, p := range r.Settings.Platforms {
 		if os, arch, ok := strings.Cut(p, "/"); !ok || os == "" || arch == "" {
@@ -322,14 +373,21 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		r.Phases[i].Collect = &run
 		r.Phases[i].Items = list
 	}
+	if a := r.Settings.Record.After; a != "" && !seenPhase[a] {
+		return nil, errf("recipe: settings.record: no phase %q", a)
+	}
 	if err := linkStagesToPhases(r); err != nil {
 		return nil, err
 	}
 	if err := checkSecrets(r); err != nil {
 		return nil, err
 	}
+	r.Files = files
 	return r, nil
 }
+
+// EpochVar is the variable every run sees with settings.source_date_epoch.
+const EpochVar = "SOURCE_DATE_EPOCH"
 
 // checkSecrets makes sure every secret a step mounts is declared in
 // settings.secrets, so that the recipe names everything its result

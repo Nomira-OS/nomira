@@ -39,13 +39,40 @@ inherited from the Arch Linux image. Recipes can set
 `org.opencontainers.image.version` in `settings.labels`; a sensible
 default is still open.
 
-### Fewer initramfs builds (recipes)
+### Overrides and layered recipes (frontend)
 
-The initramfs stage runs dracut again whenever its phase changes, even
-when the result is the same bytes. If that turns out too slow, skip
-dracut when none of its inputs changed: keep the last image and the
-checksums of the files it was built from in a cache mount. The hard part
-is knowing dracut's inputs, new firmware for instance, without running it.
+Today an include brings a group, a phase or a list of phases, and the
+including file cannot change anything in it. Wanted, in the spirit of
+kustomize:
+
+- **Top-level imports:** a recipe imports other recipes (a shared
+  base recipe, a machine-specific one on top). Their contents are merged
+  by key, the last file wins: settings key by key, prepare stages and
+  groups by name, phases by name (keeping the order of the first file
+  that defines a phase; new phases are placed with `before:` or
+  `after:`).
+- **Overrides of single values:** change one setting, one group's
+  package list or one phase's env without restating the rest, and remove
+  something (a group, a package) explicitly rather than by omission.
+- Lists stay lists where order matters. kustomize's strategic merge
+  patch merges lists of named items by their `name`, which fits phases
+  as they are; turning phases into a mapping keyed by name (say under
+  `build:`) would make that merge simpler to write, but YAML gives a
+  mapping no order, so the order would then need its own key. To be
+  decided together with the merge rules.
+- `nomira graph` and `inspect` show the merged recipe and where each
+  value came from.
+
+### Collectors that build on themselves (frontend)
+
+A collector runs one command with all items, so adding one package
+installs all of them again: from the package cache, but still unpacked,
+with all hooks, a new initramfs included. Splitting the packages over
+several collector phases (things that rarely change first) avoids that
+by hand. Better: the collector runs once per group, in a fixed order,
+each run on top of the previous one, so a new item only reruns the
+groups after it. Open: the order (by group name, or by phase), and
+removals, which still rebuild from the first changed group.
 
 ## To be tried on a real machine
 
@@ -58,7 +85,10 @@ is knowing dracut's inputs, new firmware for instance, without running it.
 - The first user from `systemd-homed-firstboot` ending up in `wheel`.
 - Soft reboots between images that share kernel and initramfs: after
   installing a package that adds nothing to the initramfs (nano, say),
-  the rebuilt initramfs must have the same checksum, so that
-  `bootc status --verbose` shows the new image as soft-rebootable.
+  the pacman hook leaves the initramfs alone, and where it does rebuild
+  it from the same inputs the result must have the same checksum, so
+  that `bootc status --verbose` shows the new image as soft-rebootable.
+- The initramfs pacman hook of arch-base: triggered by firmware, kernel
+  and dracut module packages exactly like Arch's own, and nothing else.
 - Builds as a normal user (podman-managed buildkitd) on a development
   machine.

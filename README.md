@@ -88,6 +88,8 @@ settings:
   compression: zstd                         # zstd | gzip | uncompressed, see below
   secrets:                                  # secret id: file on the build machine
     db.key: /etc/kernel/secureboot/db.key
+  source_date_epoch: 1794268800             # default: creation time of the base image, see below
+  record: true                              # true | false | a phase name, see below
 
 prepare:                                    # optional named stages (multi-stage)
   aurbuild:
@@ -152,20 +154,12 @@ is, and only phases after it can use it. Nothing of it ends up in the
 image unless a later phase copies it.
 
 Together they let a recipe end the way bootc builds a sealed image, with
-a unified kernel image whose initramfs is only rebuilt when the packages
-change:
+a unified kernel image. The base image keeps the initramfs in
+`/usr/lib/modules/<kver>/` up to date whenever a package that ends up in
+it changes, so the recipe only takes kernel and initramfs out of the image
+and builds the UKI from the system without them:
 
 ```yaml
-prepare:
-  initramfs:
-    from: packages
-    commands:
-      - >-
-        run --mount=type=tmpfs,target=/tmp mkdir /out &&
-        for d in /usr/lib/modules/*/; do k="$(basename "$d")";
-        TMPDIR=/tmp SOURCE_DATE_EPOCH=0 dracut --kver "$k" "/out/$k.img"; done &&
-        sha256sum /out/*.img
-
 phases:
   # … packages, features, services …
   - name: kernel
@@ -176,14 +170,11 @@ phases:
       uki:
         - >-
           run --mount=type=bind,from=kernel,target=/target
-          --mount=type=bind,from=packages,source=/usr/lib/modules,target=/kernels
-          --mount=type=bind,from=initramfs,source=/out,target=/initramfs
-          --mount=type=tmpfs,target=/tmp
+          --mount=type=bind,from=services,source=/usr/lib/modules,target=/kernels
           mkdir -p /boot/EFI/Linux &&
-          for d in /kernels/*; do k="$(basename "$d")"; mkdir "/tmp/$k" &&
-          cp "$d/vmlinuz" "/tmp/$k/" && cp "/initramfs/$k.img" "/tmp/$k/initramfs.img" &&
-          bootc container ukify --rootfs /target --kernel-dir "/tmp/$k" --erofs-version v1-only --
-          --output "/boot/EFI/Linux/$k.efi"; done
+          for d in /kernels/*; do
+          bootc container ukify --rootfs /target --kernel-dir "$d" --erofs-version v1-only --
+          --output "/boot/EFI/Linux/$(basename "$d").efi"; done
 ```
 
 **Secrets:** `--mount=type=secret,id=ID` makes a file available at
@@ -198,6 +189,33 @@ passes those files to BuildKit (`buildctl --secret`).
 cache. Everything that builds on it then runs again: the rest of its group
 and all following phases. Such steps therefore belong in a `prepare`
 stage, or in a group of their own as late as possible.
+
+**`source_date_epoch`:** Every `run` sees it as `SOURCE_DATE_EPOCH`
+(dracut, for one, then builds the same initramfs every time), and the
+exported image takes it as its creation time. With the exporter option
+`rewrite-timestamp=true`, which the nomira CLI always sets, the times of
+the files in the recipe's layers are clamped to it as well; the base
+image's layers stay as they are. Without the setting it is the creation
+time of the base image, so a recipe builds the same image every time
+from the same base.
+
+**`record`:** The image carries the recipe it was built from, below
+`/usr/share/nomira/recipe`: the entry file, every included file and what
+the `copy` commands take from the build context, at their paths relative
+to the recipe directory. Being below `/usr` it is part of the read-only,
+verified image, and local changes cannot make it lie. The record is added
+after the last phase before the first one that reads an earlier phase (a
+bind mount or copy from it, or a prepare stage that starts from it), so
+that what such a phase derives from the image, a UKI with its digest for
+instance, covers it; without such a phase, after the last one.
+`record: <phase>` puts it after that phase instead, `record: false`
+leaves it out.
+
+**What is loaded:** From the recipe directory the frontend reads only the
+entry file and the files it includes, one by one as it meets them, and
+from the build context only what `copy` commands name. Anything else in
+the directory never leaves the machine, and `.nomira/` (the CLI's build
+output) is always left out.
 
 **`platforms`, `tags`, `compression` and `secrets`:** The frontend checks
 them and reports them through `inspect`; the caller acts on them, since

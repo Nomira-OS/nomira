@@ -500,3 +500,81 @@ func TestCompressionAndSecrets(t *testing.T) {
 		t.Error("undeclared secret accepted")
 	}
 }
+
+func TestRecordAndContext(t *testing.T) {
+	files := map[string]string{
+		"recipe.yml": `
+settings:
+  name: x
+  base: b
+phases:
+  - name: features
+    groups:
+      a: {include: groups/a.yml}
+      b: ["copy ./files/b/ /etc/b/"]
+  - name: kernel
+    groups:
+      out: ["run rm /usr/lib/modules/*/vmlinuz"]
+  - name: uki
+    groups:
+      uki: ["run --mount=type=bind,from=kernel,target=/target true"]
+`,
+		"groups/a.yml": "- copy files/a.conf /etc/a.conf\n- copy files/b/ /etc/b2/\n",
+	}
+	read := func(name string) ([]byte, error) {
+		d, ok := files[name]
+		if !ok {
+			return nil, errf("no %s", name)
+		}
+		return []byte(d), nil
+	}
+	r, err := ParseFile("recipe.yml", read, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(r.Files, " "); got != "recipe.yml groups/a.yml" {
+		t.Errorf("files = %s", got)
+	}
+	paths, all := r.ContextPaths()
+	if all || strings.Join(paths, " ") != "files/a.conf files/b" {
+		t.Errorf("context = %v %v", paths, all)
+	}
+	// Before uki, which reads kernel: after kernel.
+	if got := r.RecordPhase(); got != 1 {
+		t.Errorf("record after phase %d, want 1", got)
+	}
+
+	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "  base: b\n", "  base: b\n  record: features\n", 1)
+	if r, err = ParseFile("recipe.yml", read, nil); err != nil || r.RecordPhase() != 0 {
+		t.Errorf("record: features: %v %v", r, err)
+	}
+	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "record: features", "record: false", 1)
+	if r, err = ParseFile("recipe.yml", read, nil); err != nil || r.RecordPhase() != -1 {
+		t.Errorf("record: false: %v", err)
+	}
+	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "record: false", "record: nope", 1)
+	if _, err = ParseFile("recipe.yml", read, nil); err == nil || !strings.Contains(err.Error(), `no phase "nope"`) {
+		t.Errorf("record: nope: %v", err)
+	}
+}
+
+func TestRecordDefaultsToLast(t *testing.T) {
+	r, err := Parse([]byte(sample), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := r.RecordPhase(); got != len(r.Phases)-1 {
+		t.Errorf("record after %d", got)
+	}
+}
+
+func TestSourceDateEpochSetting(t *testing.T) {
+	r, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: 1700000000}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	if err != nil || r.Settings.SourceDateEpoch == nil || *r.Settings.SourceDateEpoch != 1700000000 {
+		t.Fatalf("%v %v", r, err)
+	}
+	_, err = Parse([]byte("settings: {name: x, base: b, env: {SOURCE_DATE_EPOCH: '1'}}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	if err == nil || !strings.Contains(err.Error(), "settings.source_date_epoch") {
+		t.Errorf("env: %v", err)
+	}
+}

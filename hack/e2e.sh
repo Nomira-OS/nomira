@@ -139,11 +139,15 @@ phases:
       uki:
         - run --mount=type=bind,from=kernel,target=/target --mount=type=bind,from=system,source=/usr/lib/modules,target=/kernels mkdir -p /boot/EFI/Linux && for d in /kernels/*; do bootc container ukify --rootfs /target --kernel-dir "$d" -- --output "/boot/EFI/Linux/$(basename "$d").efi"; done
 EOF
+  # The fake ukify writes kernel, initramfs and the tree below
+  # /usr/lib/modules into the "UKI", and whether the record is in the tree
+  # it was given: the digest must cover the record.
   cat > "$work/uki/files/bootc" <<'EOF'
 #!/bin/sh
 set -eu
 [ "$1 $2" = "container ukify" ] || exit 2
-{ cat "$6/vmlinuz" "$6/initramfs.img"; find "$4/usr/lib/modules" | sed "s|^$4||" | sort; } > "$9"
+{ cat "$6/vmlinuz" "$6/initramfs.img"; find "$4/usr/lib/modules" | sed "s|^$4||" | sort;
+  [ -f "$4/usr/share/nomira/recipe/recipe.yml" ] && echo record; } > "$9"
 EOF
   must_build uki || return 0
   has uki usr/lib/modules/7.0/modules.dep dep
@@ -152,8 +156,66 @@ EOF
   hasnot uki kernels
   efi="$work/uki/out/boot/EFI/Linux/7.0.efi"
   [ -f "$efi" ] || { fail "no UKI"; return 0; }
-  expected="$(printf 'kernel\ninitrd\n/usr/lib/modules\n/usr/lib/modules/7.0\n/usr/lib/modules/7.0/modules.dep')"
+  expected="$(printf 'kernel\ninitrd\n/usr/lib/modules\n/usr/lib/modules/7.0\n/usr/lib/modules/7.0/modules.dep\nrecord')"
   [ "$(cat "$efi")" = "$expected" ] || fail "UKI content: $(cat "$efi")"
+}
+
+# The recipe goes into the image: its files and what its copies take from
+# the context, nothing else. The context holds only what copies name.
+case_record() {
+  recipe record <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: {include: groups/a.yml}
+EOF
+  mkdir -p "$work/record/groups"
+  echo '- copy files/a /etc/a' > "$work/record/groups/a.yml"
+  echo a > "$work/record/files/a"
+  echo secret > "$work/record/files/unused"
+  echo '{}' > "$work/record/unused.yml"
+  must_build record || return 0
+  has record etc/a a
+  has record usr/share/nomira/recipe/recipe.yml
+  has record usr/share/nomira/recipe/groups/a.yml '- copy files/a /etc/a'
+  has record usr/share/nomira/recipe/files/a a
+  hasnot record usr/share/nomira/recipe/files/unused
+  hasnot record usr/share/nomira/recipe/unused.yml
+  logged record 'context] load files/a$'
+  notlogged record 'unused'
+
+  RECIPE_SETTINGS="record: false" recipe record_off <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run echo x > /etc/x"]
+EOF
+  must_build record_off || return 0
+  has record_off etc/x x
+  hasnot record_off usr/share/nomira
+}
+
+# Every run sees settings.source_date_epoch, and the exported image is
+# clamped to it: its creation time and the times of the files in its
+# layers.
+case_source_date_epoch() {
+  RECIPE_SETTINGS="source_date_epoch: 1234" recipe epoch <<'EOF'
+phases:
+  - name: content
+    groups:
+      a: ["run echo $SOURCE_DATE_EPOCH > /etc/epoch"]
+EOF
+  must_build epoch || return 0
+  has epoch etc/epoch 1234
+  d="$work/epoch"
+  buildctl build \
+    --frontend gateway.v0 --opt source="$FRONTEND" \
+    --local context="$d" --local dockerfile="$d" --opt filename=recipe.yml \
+    --output type=oci,dest="$d/img.tar",compression=gzip,rewrite-timestamp=true \
+    --progress=plain > "$d/log" 2>&1 || { fail "oci export failed"; tail -n 20 "$d/log"; return 0; }
+  mkdir "$d/img" && tar -xf "$d/img.tar" -C "$d/img"
+  got="$(python3 "$(dirname "$0")/oci-times.py" "$d/img")"
+  [ "$got" = "1970-01-01T00:20:34Z 1234" ] || fail "creation time and newest file in the last layer: $got"
 }
 
 case_secret_mount() {
@@ -546,7 +608,8 @@ all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_is
 delete_alone_is_fine allow_identical shared rewrite_counts_as_write serial_phases
 collectors long_form_and_includes expects independent_of_base fallback_symlink
 fallback_mode fallback_type isolated_single_group tmpfs_mount
-context_excludes_output uki secret_mount stage_from_phase"
+context_excludes_output uki secret_mount stage_from_phase record
+source_date_epoch"
 
 for c in ${*:-$all}; do
   count=$((count + 1))

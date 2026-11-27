@@ -7,11 +7,13 @@ package frontend
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
+	commonexptypes "github.com/moby/buildkit/exporter/exptypes"
 	"github.com/moby/buildkit/frontend/gateway/client"
 	"golang.org/x/sync/errgroup"
 
@@ -35,10 +37,7 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	if filename == "" {
 		filename = defaultFilename
 	}
-	read, err := recipeReader(ctx, c, filename)
-	if err != nil {
-		return nil, err
-	}
+	read := recipeReader(ctx, c)
 
 	buildArgs := map[string]string{}
 	for k, v := range opts {
@@ -51,6 +50,19 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
+
+
+	// Carry the base image's config (entrypoint, env, labels …) so the
+	// exported image stays bootable; bootc images live or die by it.
+	base, err := resolveBaseConfig(ctx, c, r.Settings.Base)
+	if err != nil {
+		return nil, fmt.Errorf("read image config of base %s: %w", r.Settings.Base, err)
+	}
+	epoch := sourceDateEpoch(r.Settings.SourceDateEpoch, base)
+	if r.Settings.Env == nil {
+		r.Settings.Env = map[string]string{}
+	}
+	r.Settings.Env[recipe.EpochVar] = strconv.FormatInt(epoch, 10)
 
 	// The graph is assembled phase by phase, looking at real results on the
 	// way: whether a group without run may be built apart from the state
@@ -75,12 +87,6 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		return nil, err
 	}
 
-	// Carry the base image's config (entrypoint, env, labels …) so the
-	// exported image stays bootable; bootc images live or die by it.
-	base, err := resolveBaseConfig(ctx, c, r.Settings.Base)
-	if err != nil {
-		return nil, fmt.Errorf("read image config of base %s: %w", r.Settings.Base, err)
-	}
 	// Solve the final state.
 	def, err := b.Final.Marshal(ctx)
 	if err != nil {
@@ -95,40 +101,46 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		return nil, err
 	}
 
-	cfg, err := imageConfig(base, r.Settings.Description, r.Settings.Labels)
+	cfg, err := imageConfig(base, r.Settings.Description, r.Settings.Labels, epoch)
 	if err != nil {
 		return nil, err
 	}
 	out := client.NewResult()
 	out.AddMeta(exptypes.ExporterImageConfigKey, cfg)
+	// The epoch for the exporter: with rewrite-timestamp it clamps the
+	// file times in the layers to it. The base layers stay as they are;
+	// the base config tells the exporter which ones they are.
+	out.AddMeta(commonexptypes.ExporterEpochKey, []byte(strconv.FormatInt(epoch, 10)))
+	out.AddMeta(exptypes.ExporterImageBaseConfigKey, base)
 	out.SetRef(ref)
 	return out, nil
 }
 
-// recipeReader loads the recipe directory (entry file plus all YAML files,
-// so includes resolve) from the "dockerfile" local source and returns a
-// reader over it.
-func recipeReader(ctx context.Context, c client.Client, filename string) (recipe.ReadFunc, error) {
-	src := llb.Local(localDockerfile,
-		llb.IncludePatterns([]string{filename, "*.yml", "*.yaml", "**/*.yml", "**/*.yaml"}),
-		llb.ExcludePatterns(compile.ContextExcludes),
-		llb.WithCustomName("[recipe] load "+filename),
-	)
-	def, err := src.Marshal(ctx)
-	if err != nil {
-		return nil, err
-	}
-	res, err := c.Solve(ctx, client.SolveRequest{Definition: def.ToPB()})
-	if err != nil {
-		return nil, err
-	}
-	ref, err := res.SingleRef()
-	if err != nil {
-		return nil, err
-	}
+// recipeReader returns a reader for the files of the recipe. Each file is
+// loaded on its own from the "dockerfile" local source when the parser
+// asks for it, so nothing but the entry file and what it includes leaves
+// the recipe directory.
+func recipeReader(ctx context.Context, c client.Client) recipe.ReadFunc {
 	return func(name string) ([]byte, error) {
+		src := llb.Local(localDockerfile,
+			llb.IncludePatterns([]string{name}),
+			llb.ExcludePatterns(compile.ContextExcludes),
+			llb.WithCustomName("[recipe] load "+name),
+		)
+		def, err := src.Marshal(ctx)
+		if err != nil {
+			return nil, err
+		}
+		res, err := c.Solve(ctx, client.SolveRequest{Definition: def.ToPB()})
+		if err != nil {
+			return nil, err
+		}
+		ref, err := res.SingleRef()
+		if err != nil {
+			return nil, err
+		}
 		return ref.ReadFile(ctx, client.ReadRequest{Filename: name})
-	}, nil
+	}
 }
 
 // dependent runs the guard for the groups of a phase that have no run, in
