@@ -54,6 +54,17 @@ The plan, in steps that each stand on their own:
    2 itself. `each` has to honour the image's own NoExtract lines
    (documentation, man pages, locales), as pacman would.
 
+Buckets: a package's bucket is a function of its key alone (rendezvous
+hashing over the bucket numbers), never of the other packages, their
+versions or the order: the same package always lands in the same bucket,
+and a different number of buckets moves only the packages that have to
+move. `resolve` may print a fourth value per file, the key, which
+otherwise is the name; arch-base gives pkgbase, so that split packages
+updated together share a bucket. Later: the number of buckets
+configurable (default 64), and more distribution logics as options:
+xattrs in the manner of chunkah's `user.component`, packages above a
+size of their own, frequency hints.
+
 Upstream, a feature request to pacman: running hooks and install
 scripts for files that are already in place, for example `--dbonly`
 with an option to keep hooks and scripts, or path triggers that also
