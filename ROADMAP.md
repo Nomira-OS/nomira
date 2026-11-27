@@ -56,14 +56,25 @@ The plan, in steps that each stand on their own:
 
 Buckets: a package's bucket is a function of its key alone (rendezvous
 hashing over the bucket numbers), never of the other packages, their
-versions or the order: the same package always lands in the same bucket,
-and a different number of buckets moves only the packages that have to
-move. `resolve` may print a fourth value per file, the key, which
-otherwise is the name; arch-base gives pkgbase, so that split packages
-updated together share a bucket. Later: the number of buckets
-configurable (default 64), and more distribution logics as options:
-xattrs in the manner of chunkah's `user.component`, packages above a
-size of their own, frequency hints.
+versions or the order: adding or removing a package changes only its
+own bucket, and a different number of buckets moves only the packages
+that have to move. Buckets are not balanced, since balancing would make
+a bucket depend on the others. `resolve` may print a fourth value per
+file, the key, which otherwise is the name; arch-base gives pkgbase
+(`pacman -Sp --print-format '%n %l %h %e'`), so that split packages
+updated together share a bucket. Every bucket is built on the base
+image on its own; the order of the merge is fixed but decides nothing,
+since buckets must not overlap: the conflict check runs between buckets,
+strictly (any file in two buckets is a conflict, as it is for pacman).
+Bounded at 64 by default: one layer per package would mean hundreds of
+layers, beyond what container storage (500), registries and pulls handle
+well. Later: the number of buckets configurable, and more distribution
+logics as options: xattrs in the manner of chunkah's `user.component`,
+packages above a size of their own, frequency hints.
+
+The conflict check as a build option (`--opt check=off`, `nomira build
+--no-check`), on by default: faster builds for who accepts that groups
+or buckets that overlap are merged in a fixed order without a word.
 
 Upstream, a feature request to pacman: running hooks and install
 scripts for files that are already in place, for example `--dbonly`
