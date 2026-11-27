@@ -68,7 +68,7 @@ func GuardState(toolbox string, lower, upper llb.State, phase, group string) llb
 }
 
 func toolboxState(toolbox string) llb.State {
-	return llb.Image(toolbox, llb.WithCustomNamef("[check] %s", toolbox)).
+	return llb.Image(toolbox, ResolveMode, llb.WithCustomNamef("[check] %s", toolbox)).
 		AddEnv("PATH", defaultPath)
 }
 

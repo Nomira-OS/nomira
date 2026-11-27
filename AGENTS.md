@@ -71,7 +71,7 @@ there, not here.
   are generic: a command and a list of words.
 - **Build-time environment** is passed per `run`, never stored in the LLB
   state, so it cannot leak into other groups or the image config.
-- **Versions are pinned.** Never use `latest` or another moving tag for
+- **Versions are pinned.** Never consume `latest` or another moving tag for
   images, runners or actions. Renovate keeps pins current.
 - **Conventional Commits** for every commit (`feat:`, `fix:`, `docs:` …,
   `!` for breaking changes, which includes any incompatible schema

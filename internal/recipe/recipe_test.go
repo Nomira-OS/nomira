@@ -133,7 +133,7 @@ settings:
   name: base
   base: x
   labels: {tier: base}
-  tags: [a, b]
+  volatile: [/tmp, /run]
 stages:
   aur: {from: y, commands: [run make]}
 build:
@@ -148,7 +148,7 @@ build:
 `,
 		"common.yml": "settings: {toolbox: busybox}\n",
 		"machine/laptop.yml": `settings:
-  tags: [c]
+  volatile: [/var/log]
 build:
   firmware:
     collect: run pacman -S ${items}
@@ -181,8 +181,8 @@ build:
 	if st.Labels["owner"] != "me" || st.Labels["tier"] != "base" {
 		t.Errorf("labels are merged: %v", st.Labels)
 	}
-	if strings.Join(st.Tags, ",") != "c" {
-		t.Errorf("lists are replaced: %v", st.Tags)
+	if strings.Join(st.Volatile, ",") != "/var/log" {
+		t.Errorf("lists are replaced: %v", st.Volatile)
 	}
 	feat := r.Phases[2]
 	if strings.Join(feat.GroupNames(), ",") != "editor,hardware,ssh" {
@@ -273,8 +273,6 @@ settings:
   description: demo ${V}
   labels: {org.example.version: "${V}"}
   env: {LANG: C.UTF-8}
-  platforms: [linux/amd64, linux/arm64]
-  tags: ["${V}", stable]
   args: {V: "1.2"}
 build:
   a:
@@ -292,9 +290,6 @@ build:
 	if s.Description != "demo 1.2" || s.Labels["org.example.version"] != "1.2" || s.Env["LANG"] != "C.UTF-8" {
 		t.Errorf("settings: %+v", s)
 	}
-	if strings.Join(s.Tags, ",") != "1.2,stable" || len(s.Platforms) != 2 {
-		t.Errorf("tags/platforms: %v %v", s.Tags, s.Platforms)
-	}
 	if r.Phases[0].Env["MAKEFLAGS"] != "-j4" {
 		t.Errorf("phase env: %v", r.Phases[0].Env)
 	}
@@ -309,8 +304,6 @@ build:
 	bad := map[string]string{
 		"env name":  "settings: {base: x, env: {'1A': b}}\nbuild: {a: {groups: {g: ['run true']}}}",
 		"env cmd":   "settings: {base: x}\nbuild: {a: {groups: {g: ['env NOVALUE']}}}",
-		"platform":  "settings: {base: x, platforms: [amd64]}\nbuild: {a: {groups: {g: ['run true']}}}",
-		"tag":       "settings: {base: x, tags: ['a:b']}\nbuild: {a: {groups: {g: ['run true']}}}",
 		"phase env": "settings: {base: x}\nbuild: {a: {env: {'a-b': c}, groups: {g: ['run true']}}}",
 	}
 	for name, s := range bad {
@@ -573,23 +566,19 @@ build:
 	}
 }
 
-func TestCompressionAndSecrets(t *testing.T) {
-	parse := func(settings, cmd string) (*Recipe, error) {
-		return ParseFile("recipe.yml", mapReader(map[string]string{"recipe.yml": "settings: {base: x" + settings + "}\nbuild:\n  a:\n    groups:\n      g: ['" + cmd + "']\n"}), nil)
+func TestClientSettingsAreGone(t *testing.T) {
+	for _, key := range []string{"compression: zstd", "secrets: {a: b}", "tags: [a]", "platforms: [linux/amd64]"} {
+		_, err := Parse([]byte("settings: {base: x, "+key+"}\nbuild: {a: {groups: {g: [run true]}}}\n"), nil)
+		if err == nil || !strings.Contains(err.Error(), "is gone") {
+			t.Errorf("%s: %v", key, err)
+		}
 	}
-	r, err := parse("", "run true")
-	if err != nil || r.Settings.Compression != "zstd" {
-		t.Fatalf("default: %v, %+v", err, r)
+	r, err := Parse([]byte("settings: {base: x}\nbuild: {a: {groups: {g: ['run --mount=type=secret,id=db.key,required=true --mount=type=secret,id=tok true']}}}\n"), nil)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if r, err = parse(", compression: uncompressed, secrets: {db.key: /etc/kernel/db.key}", "run --mount=type=secret,id=db.key true"); err != nil ||
-		r.Settings.Compression != "uncompressed" || r.Settings.Secrets["db.key"] != "/etc/kernel/db.key" {
-		t.Fatalf("declared: %v, %+v", err, r)
-	}
-	if _, err := parse(", compression: lz4", "run true"); err == nil {
-		t.Error("compression lz4 accepted")
-	}
-	if _, err := parse("", "run --mount=type=secret,id=db.key true"); err == nil {
-		t.Error("undeclared secret accepted")
+	if ids := r.SecretIDs(); len(ids) != 2 || !ids["db.key"] || ids["tok"] {
+		t.Errorf("secret ids: %v", ids)
 	}
 }
 

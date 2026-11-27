@@ -284,7 +284,7 @@ EOF
 }
 
 case_secret_mount() {
-  RECIPE_SETTINGS="secrets: {tok: tok}" recipe secret_mount <<'EOF'
+  recipe secret_mount <<'EOF'
 build:
   content:
     groups:
@@ -296,7 +296,7 @@ EOF
   hasnot secret_mount run/secrets/tok
   # A required secret that is not given fails the build. (A cached step
   # would not notice: the secret is not part of the cache key.)
-  RECIPE_SETTINGS="secrets: {tok: tok}" recipe secret_missing <<'EOF'
+  recipe secret_missing <<'EOF'
 build:
   content:
     groups:

@@ -27,10 +27,6 @@ type rawSettings struct {
 	Description string            `yaml:"description"`
 	Labels      map[string]string `yaml:"labels"`
 	Env         map[string]string `yaml:"env"`
-	Platforms   []string          `yaml:"platforms"`
-	Tags        []string          `yaml:"tags"`
-	Compression string            `yaml:"compression"`
-	Secrets     map[string]string `yaml:"secrets"`
 
 	SourceDateEpoch rawEpoch  `yaml:"source_date_epoch"`
 	Record          *bool     `yaml:"record"`
@@ -95,6 +91,9 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 	if err != nil {
 		return nil, errf("recipe: %w", err)
 	}
+	if err := checkRemoved(doc.root); err != nil {
+		return nil, err
+	}
 	var raw rawRecipe
 	if err := decodeStrict(doc.root, &raw); err != nil {
 		return nil, errf("recipe: %w", err)
@@ -131,10 +130,6 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Description: ExpandArgs(raw.Settings.Description, args),
 			Labels:      expandMap(raw.Settings.Labels, args),
 			Env:         expandMap(raw.Settings.Env, args),
-			Platforms:   raw.Settings.Platforms,
-			Tags:        raw.Settings.Tags,
-			Compression: raw.Settings.Compression,
-			Secrets:     expandMap(raw.Settings.Secrets, args),
 
 			SourceDateEpoch: raw.Settings.SourceDateEpoch.Value,
 			EpochOff:        raw.Settings.SourceDateEpoch.Off,
@@ -159,29 +154,6 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 				return nil, errf("recipe: settings.volatile: %q is not a clean absolute path below /", p)
 			}
 			r.Settings.Volatile = append(r.Settings.Volatile, path.Clean(p))
-		}
-	}
-	for _, p := range r.Settings.Platforms {
-		if os, arch, ok := strings.Cut(p, "/"); !ok || os == "" || arch == "" {
-			return nil, errf("recipe: settings.platforms: %q is not of the form os/arch", p)
-		}
-	}
-	for i, t := range r.Settings.Tags {
-		r.Settings.Tags[i] = ExpandArgs(t, args)
-		if r.Settings.Tags[i] == "" || strings.ContainsAny(r.Settings.Tags[i], " /:") {
-			return nil, errf("recipe: settings.tags: %q is not a valid tag", t)
-		}
-	}
-	switch r.Settings.Compression {
-	case "":
-		r.Settings.Compression = "zstd"
-	case "zstd", "gzip", "uncompressed":
-	default:
-		return nil, errf("recipe: settings.compression: %q is not zstd, gzip or uncompressed", r.Settings.Compression)
-	}
-	for id, src := range r.Settings.Secrets {
-		if id == "" || strings.ContainsAny(id, "/ ") || src == "" {
-			return nil, errf("recipe: settings.secrets: %q: expected an id without slashes and a file", id)
 		}
 	}
 	if r.Settings.Base == "" {
@@ -365,50 +337,31 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 	if err := linkStagesToPhases(r); err != nil {
 		return nil, err
 	}
-	if err := checkSecrets(r); err != nil {
-		return nil, err
-	}
 	return r, nil
 }
 
 // EpochVar is the variable every run sees with settings.source_date_epoch.
 const EpochVar = "SOURCE_DATE_EPOCH"
 
-// checkSecrets makes sure every secret a step mounts is declared in
-// settings.secrets, so that the recipe names everything its result
-// depends on.
-func checkSecrets(r *Recipe) error {
-	check := func(where string, cmds []Command) error {
-		for _, c := range cmds {
-			run, ok := c.(RunCmd)
-			if !ok {
-				continue
-			}
-			for _, m := range run.Mounts {
-				if m.Type == "secret" {
-					if _, ok := r.Settings.Secrets[m.ID]; !ok {
-						return errf("%s: secret %q is not declared in settings.secrets", where, m.ID)
-					}
-				}
-			}
-		}
+// removedSettings are settings that older recipes had and that are
+// options of the BuildKit client now: a frontend cannot set them, so the
+// recipe does not either. The error says where they went.
+var removedSettings = map[string]string{
+	"compression": "the layer compression is a client option: nomira build --compression, or compression = … in nomira.conf",
+	"secrets":     "where a secret comes from is a client option: nomira build --secret id=ID,src=FILE, or secret = … in nomira.conf; the recipe only mounts it",
+	"tags":        "image names are a client option",
+	"platforms":   "the platform is a client option; the frontend builds the one BuildKit asks for",
+}
+
+func checkRemoved(root *yaml.Node) error {
+	si := indexOf(root, "settings")
+	if si < 0 || root.Content[si+1].Kind != yaml.MappingNode {
 		return nil
 	}
-	for name, st := range r.Stages {
-		if err := check("prepare "+name, st.Commands); err != nil {
-			return err
-		}
-	}
-	for _, ph := range r.Phases {
-		if ph.Collect != nil {
-			if err := check("phase "+ph.Name, []Command{*ph.Collect}); err != nil {
-				return err
-			}
-		}
-		for g, grp := range ph.Groups {
-			if err := check("phase "+ph.Name+", group "+g, grp.Commands); err != nil {
-				return err
-			}
+	m := root.Content[si+1]
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if why, ok := removedSettings[m.Content[i].Value]; ok {
+			return errf("recipe: settings.%s is gone: %s", m.Content[i].Value, why)
 		}
 	}
 	return nil

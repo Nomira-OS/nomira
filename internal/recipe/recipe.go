@@ -61,6 +61,32 @@ type Recipe struct {
 	Resolved []byte
 }
 
+// SecretIDs returns the ids of the secrets the recipe mounts, sorted, each
+// with whether a step requires it.
+func (r *Recipe) SecretIDs() map[string]bool {
+	ids := map[string]bool{}
+	add := func(cmds []Command) {
+		for _, c := range cmds {
+			run, ok := c.(RunCmd)
+			if !ok {
+				continue
+			}
+			for _, m := range run.Mounts {
+				if m.Type == "secret" {
+					ids[m.ID] = ids[m.ID] || m.Required
+				}
+			}
+		}
+	}
+	for _, st := range r.Stages {
+		add(st.Commands)
+	}
+	for _, ph := range r.Phases {
+		add(ph.Commands())
+	}
+	return ids
+}
+
 // ContextPaths returns what the copy commands of the recipe take from the
 // build context, as include patterns relative to it. all is true when a
 // copy takes the whole context.
@@ -115,17 +141,10 @@ type Settings struct {
 	Description string            // becomes the org.opencontainers.image.description label
 	Labels      map[string]string // image labels
 	Env         map[string]string // build-time environment for every run
-	// Platforms and Tags are declarations for the caller (CLI, CI): the
-	// frontend validates and reports them via `inspect` but builds for the
-	// platform BuildKit asks for and never tags anything itself.
-	Platforms []string
-	Tags      []string
-	// Compression and Secrets are for the caller, too: layer compression
-	// of the exported image (zstd, gzip or uncompressed; default zstd), and
-	// for each secret id the file on the build machine that provides it.
-	// They live in the recipe because they shape the result.
-	Compression string
-	Secrets     map[string]string
+	// What only the client can decide (platform, image names, layer
+	// compression, where secrets come from) is not part of a recipe:
+	// those are options of the BuildKit client, see removedSettings.
+
 	// SourceDateEpoch is the time, in seconds since 1970, that every run
 	// sees as SOURCE_DATE_EPOCH and to which the exported image clamps its
 	// timestamps. nil: the creation time of the base image. EpochOff

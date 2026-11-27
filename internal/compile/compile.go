@@ -244,8 +244,12 @@ func describePaths(paths []string, all bool) string {
 	return strings.Join(paths, " ")
 }
 
+// ResolveMode is how images are looked up: the client's
+// image-resolve-mode (default, pull, local).
+var ResolveMode = llb.ResolveModeDefault
+
 func baseState(ref, name string) llb.State {
-	return llb.Image(ref, llb.WithCustomNamef("[%s] %s", name, ref)).
+	return llb.Image(ref, ResolveMode, llb.WithCustomNamef("[%s] %s", name, ref)).
 		AddEnv("PATH", defaultPath)
 }
 

@@ -27,6 +27,7 @@ const (
 	keyFilename     = "filename"
 	defaultFilename = "recipe.yml"
 	buildArgPrefix  = "build-arg:"
+	keyResolveMode  = "image-resolve-mode"
 )
 
 // Build is the gateway entrypoint (grpcclient.RunFromEnvironment target).
@@ -38,6 +39,19 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		filename = defaultFilename
 	}
 	read := recipeReader(ctx, c)
+	// image-resolve-mode, as for the Dockerfile frontend: whether images
+	// given by tag are pulled again (pull), taken from the local store if
+	// there (local), or the default.
+	switch mode := opts[keyResolveMode]; mode {
+	case "", "default":
+		compile.ResolveMode = llb.ResolveModeDefault
+	case "pull":
+		compile.ResolveMode = llb.ResolveModeForcePull
+	case "local":
+		compile.ResolveMode = llb.ResolveModePreferLocal
+	default:
+		return nil, fmt.Errorf("image-resolve-mode %q: expected default, pull or local", mode)
+	}
 
 	buildArgs := map[string]string{}
 	for k, v := range opts {

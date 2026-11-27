@@ -7,6 +7,7 @@
 //	lint  [file|-]   parse + schema-validate a recipe; exit 1 with errors
 //	graph [file|-]   print the pipeline as a Mermaid flowchart
 //	inspect [file|-] print name, base and phase/group names as JSON
+//	version          print the version of the frontend
 //	resolve [file|-] print the recipe with all imports merged, as the
 //	                 image records it in its label org.nomira.recipe
 //
@@ -40,6 +41,9 @@ func main() {
 			os.Exit(graph())
 		case "resolve":
 			os.Exit(resolve())
+		case "version":
+			fmt.Println(frontend.Version)
+			return
 		case "--help", "-h", "help":
 			usage(os.Stdout)
 			return
@@ -64,6 +68,7 @@ usage:
   nomira-frontend graph [f|-]  print pipeline as Mermaid (default: stdin)
   nomira-frontend inspect [f|-] print name, base, phases and groups as JSON
   nomira-frontend resolve [f|-] print the recipe with all imports merged
+  nomira-frontend version       print the version
 
 Recipes that use "imports" must be given as a file path.
 `)
@@ -140,13 +145,14 @@ func inspect() int {
 		Detail  []group  `json:"detail,omitempty"`
 	}
 	out := struct {
-		Name        string            `json:"name"`
-		Description string            `json:"description,omitempty"`
-		Base        string            `json:"base"`
-		Platforms   []string          `json:"platforms,omitempty"`
-		Tags        []string          `json:"tags,omitempty"`
-		Compression string            `json:"compression"`
-		Secrets     map[string]string `json:"secrets,omitempty"`
+		Name        string `json:"name"`
+		Description string `json:"description,omitempty"`
+		Base        string `json:"base"`
+		// Version of this frontend: semver for releases, sha-<commit>
+		// for development builds.
+		Version string `json:"version"`
+		// The secrets the recipe mounts: id → required by a step.
+		Secrets map[string]bool `json:"secrets,omitempty"`
 		// "off", "base" (the base image's creation time) or the seconds.
 		SourceDateEpoch string   `json:"source_date_epoch"`
 		Record          bool     `json:"record"`
@@ -154,8 +160,7 @@ func inspect() int {
 		Phases          []phase  `json:"phases"`
 	}{
 		Name: r.Settings.Name, Description: r.Settings.Description, Base: r.Settings.Base,
-		Platforms: r.Settings.Platforms, Tags: r.Settings.Tags,
-		Compression: r.Settings.Compression, Secrets: r.Settings.Secrets,
+		Version: frontend.Version, Secrets: r.SecretIDs(),
 		SourceDateEpoch: "base", Record: r.Settings.Record, Volatile: r.Settings.Volatile,
 	}
 	switch {

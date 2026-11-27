@@ -83,11 +83,6 @@ settings:
     LANG: C.UTF-8
   args:
     VERSION: "1.0"                          # ${VERSION} in commands; --build-arg overrides
-  platforms: [linux/amd64]                  # information for CLI and CI, see below
-  tags: ["${VERSION}", stable]              # information for CLI and CI, see below
-  compression: zstd                         # zstd | gzip | uncompressed, see below
-  secrets:                                  # secret id: file on the build machine
-    db.key: /etc/kernel/secureboot/db.key
   source_date_epoch: 1794268800             # seconds | true (default: the base image's time) | false
   record: true                              # the resolved recipe as the label org.nomira.recipe
   volatile: [/run, /tmp, /var/cache, /var/log, /var/tmp]   # the default, see below
@@ -184,10 +179,10 @@ build:
 **Secrets:** `--mount=type=secret,id=ID` makes a file available at
 `/run/secrets/ID` for that one step, for a signing key for instance. It
 never ends up in a layer or in the cache key; `required=true` fails the
-step when the secret is missing. Every secret a recipe mounts must be
-declared in `settings.secrets` with the file on the build machine that
-provides it (`secrets: {db.key: /etc/kernel/secureboot/db.key}`); the CLI
-passes those files to BuildKit (`buildctl --secret`).
+step when the secret is missing. Where the secret comes from is the
+client's business (`buildctl --secret id=ID,src=FILE`; the nomira CLI
+takes it from `--secret` or `nomira.conf`); `inspect` lists the ids a
+recipe mounts.
 
 **`run --no-cache`:** The step always runs, even if BuildKit has it in its
 cache. Everything that builds on it then runs again: the rest of its group
@@ -197,7 +192,7 @@ a group of their own as late as possible.
 **`source_date_epoch`:** Every `run` sees it as `SOURCE_DATE_EPOCH`
 (dracut, for one, then builds the same initramfs every time), and the
 exported image takes it as its creation time. With the exporter option
-`rewrite-timestamp=true`, which the nomira CLI always sets, the times of
+`rewrite-timestamp=true` (a client option; the nomira CLI always sets it), the times of
 the files in the recipe's layers are clamped to it as well; the base
 image's layers stay as they are. Without the setting it is the creation
 time of the base image, so a recipe builds the same image every time
@@ -231,12 +226,14 @@ from the build context only what `copy` commands name. Anything else in
 the directory never leaves the machine, and `.nomira/` (the CLI's build
 output) is always left out.
 
-**`platforms`, `tags`, `compression` and `secrets`:** The frontend checks
-them and reports them through `inspect`; the caller acts on them, since
-BuildKit leaves the platform, the tags, the exporter and the secrets to
-the client. The nomira CLI uses `compression` for the exported layers and
-passes the `secrets` files on; everything that shapes the image is thus
-in the recipe, not in command line flags.
+**What is not in a recipe:** whatever only the BuildKit client can set.
+The platform, image names, the exporter and its options (format, layer
+compression, `rewrite-timestamp`) and the files behind secrets are
+options of `buildctl`; a frontend cannot set them, so a recipe does not
+name them either. The rule: what has to be a client option does not
+belong in the recipe. The frontend builds for the platform BuildKit asks
+for. `image-resolve-mode` (`default`, `pull`, `local`) is taken as the
+Dockerfile frontend takes it, for the base image and stages.
 
 ## Groups
 
@@ -355,7 +352,7 @@ those of JSON Merge Patch (RFC 7386):
 - **Mappings are merged** key by key: settings, labels, env, stages,
   phases, groups.
 - **Everything else is replaced** by the later file: strings, numbers,
-  and lists (a group's commands or packages, `settings.tags`).
+  and lists (a group's commands or packages, `settings.volatile`).
 - **`key: null` removes** a key: a group, a stage, a phase, a label.
 
 The first file that names a key decides its place; keys new in a later
@@ -379,7 +376,15 @@ The frontend image is published as `ghcr.io/nomira-os/nomira`, for
   `final`) and carry the version number as their tag. Every release also
   moves `1-alpha`, which recipes refer to.
 - **Every commit on `main`** is published as the immutable development
-  build `sha-<short commit>`, such as `sha-f7728e3`.
+  build `sha-<short commit>`, such as `sha-f7728e3`, and moves `latest`.
+  `latest` is for trying things out; recipes that should build the same
+  tomorrow pin `sha-…` or a release. BuildKit resolves the tag in
+  `# syntax=` on every build; for the CLI's helper calls, `pull = always`
+  in `nomira.conf` makes podman fetch a moved tag too.
+
+The image reports its version (`nomira-frontend version`, and `version`
+in `inspect`): the release version, or `sha-<short commit>` for builds of
+`main`.
 
 Version and changelog follow from the Conventional Commits, see
 [Nomira-OS/ci](https://github.com/Nomira-OS/ci). Building locally works
@@ -441,6 +446,7 @@ nomira-frontend lint  recipe.yml     # parse + schema; exit 1 with errors
 nomira-frontend graph recipe.yml     # pipeline as a Mermaid flowchart
 nomira-frontend inspect recipe.yml   # name, base, phases and groups as JSON
 nomira-frontend resolve recipe.yml   # the recipe with all imports merged
+nomira-frontend version              # semver for releases, sha-<commit> for development builds
 podman run --rm -i ghcr.io/nomira-os/nomira:1-alpha lint - < recipe.yml
 ```
 
