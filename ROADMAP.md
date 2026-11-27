@@ -21,33 +21,37 @@ The plan, in steps that each stand on their own:
 1. **Measure** where a collector run spends its time: download,
    signature checks, unpacking, hooks (dracut above all), diff and
    export of the layer.
-2. **Initramfs only when its inputs change** (base image). dracut runs
-   in a step of its own at the end, fingerprinting exactly the paths
-   that Arch's dracut hooks trigger on, plus dracut's configuration and
-   files such as `/etc/vconsole.conf`; an initramfs for the same
-   fingerprint comes from a cache mount. Same detection as the hooks,
-   without rebuilding an unchanged initramfs, and without the manual
-   dracut after copying configuration.
+2. **Initramfs only when its inputs change** (base image). One script
+   builds it: it fingerprints exactly the paths that Arch's dracut hooks
+   trigger on (path, size, mtime), dracut's configuration and files such
+   as `/etc/vconsole.conf`, and takes an initramfs for the same
+   fingerprint from a cache mount instead of running dracut. The pacman
+   hook stays and calls the script, so a recipe without anything else
+   still gets a correct initramfs; a recipe part `initramfs.yml` runs it
+   once more late, before `lint` and `uki`, for configuration copied by
+   the recipe. Needs documentation of the base image.
 3. **Collectors that fan out** (frontend, generic). A collector with
-   `resolve`, `each` and `then`, all run in a tool image of the base
-   image's choosing: `resolve` prints the files to fetch (name, URL,
-   sha256); BuildKit downloads them (cached by checksum, no package
-   cache needed); `each` unpacks a bucket of them into a layer of its
-   own; the frontend merges the layers, with the conflict check between
-   buckets; `then` finishes on the merged system (package database,
-   install scripts, hooks). The frontend learns no package manager; the
-   pacman side lives in arch-base's `recipes/packages.yml`. An unchanged
-   package keeps its layer: in the build, in the export and in the
-   update download.
-4. **No pacman in the image** (base image). With the tool image doing
-   what pacstrap does (pacman on a target root), the system keeps its
-   package database but needs neither pacman nor a keyring or
-   mirrorlist; `base` gives way to an explicit package list.
+   `resolve`, `each` and `then`, without a tool image of its own:
+   `resolve` runs on the state before the phase and prints the files to
+   fetch (name, URL, sha256); BuildKit downloads them, cached by URL and
+   checksum; `each` unpacks a bucket of them on the unchanged base image
+   into a layer of its own, so its cache depends only on the base image
+   and the packages; the frontend merges the layers, with the conflict
+   check between buckets; `then` finishes on the merged system. The
+   frontend learns no package manager; the pacman side lives in
+   arch-base's `recipes/packages.yml`.
 
-To find out before step 3: whether `pacman -U --dbonly` still runs
-install scripts and hooks (libalpm has a separate NOHOOKS flag), what an
-exec per bucket costs in BuildKit, and how many layers bootc and
-registries handle well (Fedora stays at 64 or fewer).
+   For `then`, `pacman -U --dbonly` is not enough: tried, it writes the
+   database but runs neither hooks nor install scripts. The candidate is
+   an ordinary `pacman -U --overwrite '*'` with `NoExtract = *`: a real
+   transaction, so database, install scripts and hooks are pacman's own,
+   while no file is written again. If that does not hold, a small hook
+   runner in the recipe part takes its place.
+
+To find out before step 3: whether the `NoExtract` transaction behaves
+as expected (hooks, scripts, file capabilities), what an exec per bucket
+costs in BuildKit, and how many layers bootc and registries handle well
+(Fedora stays at 64 or fewer).
 
 ### Configuration defaults in /etc (base image, CLI, docs)
 
