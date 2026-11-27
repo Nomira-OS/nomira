@@ -31,7 +31,7 @@ const (
 	// LocalRecipe is the local source with the recipe's own files
 	// (BuildKit's name for the frontend's file).
 	LocalRecipe = "dockerfile"
-	defaultPath  = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
 // PhasePlan is one compiled phase.

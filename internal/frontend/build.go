@@ -51,7 +51,6 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		return nil, fmt.Errorf("%s: %w", filename, err)
 	}
 
-
 	// Carry the base image's config (entrypoint, env, labels …) so the
 	// exported image stays bootable; bootc images live or die by it.
 	base, err := resolveBaseConfig(ctx, c, r.Settings.Base)
