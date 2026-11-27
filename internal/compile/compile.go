@@ -341,7 +341,11 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 					if !ok {
 						return st, fmt.Errorf("%s: --mount from=%s: no such stage or phase", scope, m.From)
 					}
-					opts = append(opts, llb.AddMount(m.Target, src, llb.SourcePath(m.Source), llb.Readonly))
+					// No content-based cache key: BuildKit would checksum every file
+					// of the mounted tree, a whole system for a UKI, on every build
+					// in which it changed. Its LLB definition identifies it as well.
+					opts = append(opts, llb.AddMount(m.Target, src, llb.SourcePath(m.Source), llb.Readonly,
+						llb.ContentCache(llb.MountContentCacheOff)))
 					continue
 				}
 				sharing := llb.CacheMountShared
