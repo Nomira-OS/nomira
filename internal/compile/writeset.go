@@ -25,17 +25,21 @@ var listerScript string
 // the group; they are only walked, never read, to find what the group
 // deleted. Both are nil for a group that was built on an empty state: it
 // cannot delete anything.
+//
+// phase is the phase's tag (PhaseTag). The mounts get no content-based
+// cache key: lower and upper are whole systems, and BuildKit would
+// checksum every file of them.
 func WriteSetState(toolbox string, lower, upper *llb.State, layer llb.State, phase, group string) llb.State {
 	opts := []llb.RunOption{
 		llb.Args([]string{"/bin/sh", "-c", listerScript}),
 		llb.Dir("/"),
-		llb.AddMount("/nomira/d", layer, llb.Readonly),
-		llb.WithCustomNamef("[%s/%s] collect write set", phase, group),
+		llb.AddMount("/nomira/d", layer, llb.Readonly, noContentCache),
+		llb.WithCustomNamef("[check %s/%s] write set", phase, group),
 	}
 	if lower != nil && upper != nil {
 		opts = append(opts,
-			llb.AddMount("/nomira/l", *lower, llb.Readonly),
-			llb.AddMount("/nomira/u", *upper, llb.Readonly))
+			llb.AddMount("/nomira/l", *lower, llb.Readonly, noContentCache),
+			llb.AddMount("/nomira/u", *upper, llb.Readonly, noContentCache))
 	}
 	return toolboxState(toolbox).Run(opts...).Root()
 }
@@ -57,13 +61,15 @@ func GuardState(toolbox string, lower, upper llb.State, phase, group string) llb
 	return toolboxState(toolbox).Run(
 		llb.Args([]string{"/bin/sh", "-c", guardScript}),
 		llb.Dir("/"),
-		llb.AddMount("/nomira/l", lower, llb.Readonly),
-		llb.AddMount("/nomira/u", upper, llb.Readonly),
-		llb.WithCustomNamef("[%s/%s] check independence from earlier state", phase, group),
+		llb.AddMount("/nomira/l", lower, llb.Readonly, noContentCache),
+		llb.AddMount("/nomira/u", upper, llb.Readonly, noContentCache),
+		llb.WithCustomNamef("[check %s/%s] independent of earlier phases", phase, group),
 	).Root()
 }
 
 func toolboxState(toolbox string) llb.State {
-	return llb.Image(toolbox, llb.WithCustomNamef("[validate] toolbox %s", toolbox)).
+	return llb.Image(toolbox, llb.WithCustomNamef("[check] %s", toolbox)).
 		AddEnv("PATH", defaultPath)
 }
+
+var noContentCache = llb.ContentCache(llb.MountContentCacheOff)

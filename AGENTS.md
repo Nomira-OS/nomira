@@ -23,13 +23,13 @@ Sibling repositories in the Nomira-OS organization:
 
 ## Layout
 
-- `internal/recipe`: schema, parser, `include` resolution. No BuildKit imports.
+- `internal/recipe`: schema, parser, merging of `imports`. No BuildKit imports.
 - `internal/conflict`: disjointness check. Pure, no BuildKit imports.
 - `internal/compile`: recipe to LLB; `lister.sh` collects a group's write set,
   `guard.sh` decides whether a group without `run` may be built apart from
   the state before it.
 - `internal/frontend`: gateway entrypoint, image config.
-- `cmd/frontend`: the binary; also the `lint`, `graph` and `inspect` modes
+- `cmd/frontend`: the binary; also the `lint`, `graph`, `inspect` and `resolve` modes
   that the CLI calls through the image.
 - `docs/concept.md`: the original design. Historical; the README is authoritative.
 
@@ -53,7 +53,7 @@ there, not here.
 
 - **Schema changes** touch four places together: the parser, its tests,
   the README and `examples/recipe.yml`. YAML decoding is strict; unknown
-  keys are errors, also in included files.
+  keys are errors, also in imported files.
 - **Error messages** speak in recipe terms (phase, group, path), never in
   LLB vertex ids.
 - **`lister.sh` and `guard.sh`** must run with busybox tools only and are

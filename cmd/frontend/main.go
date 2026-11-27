@@ -7,6 +7,8 @@
 //	lint  [file|-]   parse + schema-validate a recipe; exit 1 with errors
 //	graph [file|-]   print the pipeline as a Mermaid flowchart
 //	inspect [file|-] print name, base and phase/group names as JSON
+//	resolve [file|-] print the recipe with all imports merged, as the
+//	                 image records it in its label org.nomira.recipe
 //
 // lint/graph exist so a thin CLI (in any language) can reuse the Go parser
 // by running this image via podman instead of reimplementing the schema.
@@ -36,6 +38,8 @@ func main() {
 			os.Exit(inspect())
 		case "graph":
 			os.Exit(graph())
+		case "resolve":
+			os.Exit(resolve())
 		case "--help", "-h", "help":
 			usage(os.Stdout)
 			return
@@ -59,13 +63,14 @@ usage:
   nomira-frontend lint  [f|-]  parse + validate a recipe (default: stdin)
   nomira-frontend graph [f|-]  print pipeline as Mermaid (default: stdin)
   nomira-frontend inspect [f|-] print name, base, phases and groups as JSON
+  nomira-frontend resolve [f|-] print the recipe with all imports merged
 
-Recipes that use "include" must be given as a file path.
+Recipes that use "imports" must be given as a file path.
 `)
 }
 
 // load parses the recipe named on the command line, or stdin for "-" or no
-// argument. Includes need a file path: they resolve relative to it.
+// argument. Imports need a file path: they resolve relative to it.
 func load() (*recipe.Recipe, error) {
 	if len(os.Args) > 2 && os.Args[2] != "-" {
 		dir, entry := filepath.Split(os.Args[2])
@@ -89,6 +94,16 @@ func lint() int {
 		return 1
 	}
 	fmt.Println("ok")
+	return 0
+}
+
+func resolve() int {
+	r, err := load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	os.Stdout.Write(r.Resolved)
 	return 0
 }
 

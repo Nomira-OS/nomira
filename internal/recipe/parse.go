@@ -1,7 +1,6 @@
 package recipe
 
 import (
-	"bytes"
 	"fmt"
 	"path"
 	"sort"
@@ -14,8 +13,8 @@ import (
 
 type rawRecipe struct {
 	Settings rawSettings         `yaml:"settings"`
-	Prepare  map[string]rawStage `yaml:"prepare"`
-	Phases   []rawPhase          `yaml:"phases"`
+	Stages   map[string]rawStage `yaml:"stages"`
+	Build    yaml.Node           `yaml:"build"`
 }
 
 type rawSettings struct {
@@ -68,18 +67,8 @@ func (e *rawEpoch) UnmarshalYAML(n *yaml.Node) error {
 }
 
 type rawStage struct {
-	From     string  `yaml:"from"`
-	Commands cmdList `yaml:"commands"`
-}
-
-type rawPhase struct {
-	Name       string              `yaml:"name"`
-	Validation string              `yaml:"validation"`
-	Shared     []string            `yaml:"shared"`
-	Env        map[string]string   `yaml:"env"`
-	Include    string              `yaml:"include"`
-	Collect    string              `yaml:"collect"`
-	Groups     map[string]rawGroup `yaml:"groups"`
+	From     string   `yaml:"from"`
+	Commands []string `yaml:"commands"`
 }
 
 // Parse decodes, schema-validates and arg-expands a recipe. buildArgs are the
@@ -87,45 +76,29 @@ type rawPhase struct {
 // declared in settings.args may be overridden.
 //
 // Parse handles a single self-contained file; use ParseFile for recipes
-// that use `include`.
+// that use `imports`.
 func Parse(data []byte, buildArgs map[string]string) (*Recipe, error) {
 	const entry = "recipe.yml"
 	return ParseFile(entry, func(name string) ([]byte, error) {
 		if name == entry {
 			return data, nil
 		}
-		return nil, errf("includes are not available when the recipe is read from a single stream")
+		return nil, errf("imports are not available when the recipe is read from a single stream")
 	}, buildArgs)
 }
 
-// ParseFile parses the recipe at entry, resolving `include` through read.
-// Include paths are relative to the including file.
+// ParseFile parses the recipe at entry, merging its imports, which it
+// reads through read. Import paths are relative to the importing file.
 func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recipe, error) {
 	entry = path.Clean(entry)
-	// Every file the recipe consists of, for the record and so that the
-	// frontend loads nothing else.
-	var files []string
-	seenFile := map[string]bool{}
-	inner := read
-	read = func(name string) ([]byte, error) {
-		data, err := inner(name)
-		if err == nil && !seenFile[name] {
-			seenFile[name] = true
-			files = append(files, name)
-		}
-		return data, err
-	}
-	data, err := read(entry)
+	doc, err := loadDocument(entry, read)
 	if err != nil {
 		return nil, errf("recipe: %w", err)
 	}
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
 	var raw rawRecipe
-	if err := dec.Decode(&raw); err != nil {
+	if err := decodeStrict(doc.root, &raw); err != nil {
 		return nil, errf("recipe: %w", err)
 	}
-	ld := &loader{read: read, stack: []string{entry}}
 
 	// Effective args: declared defaults, overridden by build args.
 	args := map[string]string{}
@@ -139,7 +112,15 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		args[k] = v
 	}
 
+	setArgs(doc.root, buildArgs)
+	resolved, err := doc.resolved(entry)
+	if err != nil {
+		return nil, errf("recipe: %w", err)
+	}
+
 	r := &Recipe{
+		Files:    doc.files,
+		Resolved: resolved,
 		Settings: Settings{
 			Name:       raw.Settings.Name,
 			Base:       ExpandArgs(raw.Settings.Base, args),
@@ -160,7 +141,7 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Record:          raw.Settings.Record == nil || *raw.Settings.Record,
 			Volatile:        DefaultVolatile,
 		},
-		Prepare: map[string]Stage{},
+		Stages: map[string]Stage{},
 	}
 	if err := checkEnvNames("settings.env", r.Settings.Env); err != nil {
 		return nil, err
@@ -217,47 +198,40 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		return nil, errf("recipe: settings.args: %q is reserved for collector phases", itemsVar)
 	}
 
-	// Prepare stages.
-	for name, rs := range raw.Prepare {
+	// Stages.
+	for name, rs := range raw.Stages {
 		if name == "context" || strings.Contains(name, "/") {
-			return nil, errf("recipe: prepare stage name %q is not allowed", name)
+			return nil, errf("recipe: stage name %q is not allowed", name)
 		}
-		fs, err := ld.stage(entry, rs)
+		st, err := buildStage(rs, args)
 		if err != nil {
-			return nil, errf("recipe: prepare.%s: %w", name, err)
+			return nil, errf("recipe: stages.%s: %w", name, err)
 		}
-		st, err := buildStage(fs, args)
-		if err != nil {
-			return nil, errf("recipe: prepare.%s: %w", name, err)
-		}
-		r.Prepare[name] = st
+		r.Stages[name] = st
 	}
 
 	// Phases.
-	phases, err := ld.phases(entry, raw.Phases)
+	phases, err := phaseList(&raw.Build)
 	if err != nil {
 		return nil, errf("recipe: %w", err)
 	}
 	if len(phases) == 0 {
-		return nil, errf("recipe: phases must not be empty")
+		return nil, errf("recipe: build must not be empty")
 	}
 	seenPhase := map[string]bool{}
 	collectors := map[string]bool{}
-	for pi, rp := range phases {
-		if rp.Name == "" {
-			return nil, errf("recipe: phases[%d]: name is required", pi)
-		}
-		if seenPhase[rp.Name] {
-			return nil, errf("recipe: duplicate phase name %q", rp.Name)
+	for _, rp := range phases {
+		if rp.Name == "" || strings.Contains(rp.Name, "/") {
+			return nil, errf("recipe: phase name %q is not allowed", rp.Name)
 		}
 		seenPhase[rp.Name] = true
 		if rp.Collect != "" {
 			collectors[rp.Name] = true
 		}
 	}
-	for name := range raw.Prepare {
+	for name := range raw.Stages {
 		if seenPhase[name] {
-			return nil, errf("recipe: %q is both a prepare stage and a phase", name)
+			return nil, errf("recipe: %q is both a stage and a phase", name)
 		}
 	}
 	items := map[string]map[string]bool{} // collector -> set of items
@@ -295,31 +269,31 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		}
 		for gname, fg := range rp.Groups {
 			where := fmt.Sprintf("recipe: phase %q: group %q", rp.Name, gname)
-			if len(fg.Lines) == 0 && len(fg.Contribute) == 0 {
+			if len(fg.Commands) == 0 && len(fg.Contribute) == 0 {
 				return nil, errf("%s: needs commands or a contribution to a collector", where)
 			}
 			// Stages of the group. Their names are local to it.
 			local := map[string]string{}
-			for sname, fs := range fg.Prepare {
+			for sname, fs := range fg.Stages {
 				if sname == "context" || strings.Contains(sname, "/") {
-					return nil, errf("%s: prepare stage name %q is not allowed", where, sname)
+					return nil, errf("%s: stage name %q is not allowed", where, sname)
 				}
 				st, err := buildStage(fs, args)
 				if err != nil {
-					return nil, errf("%s: prepare.%s: %w", where, sname, err)
+					return nil, errf("%s: stages.%s: %w", where, sname, err)
 				}
 				qual := rp.Name + "/" + gname + "/" + sname
 				local[sname] = qual
-				r.Prepare[qual] = st
+				r.Stages[qual] = st
 			}
 			grp := Group{}
-			for i, line := range fg.Lines {
+			for i, line := range fg.Commands {
 				cmd, err := ParseCommand(ExpandArgs(line, args))
 				if err != nil {
 					return nil, errf("%s: command %d: %w", where, i+1, err)
 				}
 				resolve := func(name string) (string, error) {
-					return resolveFrom(name, local, raw.Prepare, earlier, seenPhase)
+					return resolveFrom(name, local, raw.Stages, earlier, seenPhase)
 				}
 				if cmd, err = resolveSources(cmd, resolve); err != nil {
 					return nil, errf("%s: command %d: %w", where, i+1, err)
@@ -379,7 +353,7 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			before[p.Name] = true
 		}
 		resolved, err := resolveSources(run, func(name string) (string, error) {
-			return resolveFrom(name, nil, raw.Prepare, before, seenPhase)
+			return resolveFrom(name, nil, raw.Stages, before, seenPhase)
 		})
 		if err != nil {
 			return nil, errf("recipe: phase %q: collect: %w", rp.Name, err)
@@ -394,7 +368,6 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 	if err := checkSecrets(r); err != nil {
 		return nil, err
 	}
-	r.Files = files
 	return r, nil
 }
 
@@ -421,7 +394,7 @@ func checkSecrets(r *Recipe) error {
 		}
 		return nil
 	}
-	for name, st := range r.Prepare {
+	for name, st := range r.Stages {
 		if err := check("prepare "+name, st.Commands); err != nil {
 			return err
 		}
@@ -448,14 +421,14 @@ func linkStagesToPhases(r *Recipe) error {
 	for i, ph := range r.Phases {
 		index[ph.Name] = i
 	}
-	for name, st := range r.Prepare {
+	for name, st := range r.Stages {
 		if _, ok := index[st.From]; ok {
 			st.FromPhase = st.From
-			r.Prepare[name] = st
+			r.Stages[name] = st
 		}
 	}
 	check := func(i int, from string) error {
-		st, ok := r.Prepare[from]
+		st, ok := r.Stages[from]
 		if !ok || st.FromPhase == "" {
 			return nil
 		}
@@ -497,16 +470,16 @@ const (
 	itemsRef = "${items}"
 )
 
-// buildStage parses the commands of a prepare stage.
-func buildStage(fs flatStage, args map[string]string) (Stage, error) {
+// buildStage parses the commands of a stage.
+func buildStage(fs rawStage, args map[string]string) (Stage, error) {
 	if fs.From == "" {
 		return Stage{}, errf("from is required")
 	}
-	if len(fs.Lines) == 0 {
+	if len(fs.Commands) == 0 {
 		return Stage{}, errf("commands must not be empty")
 	}
 	st := Stage{From: ExpandArgs(fs.From, args)}
-	for i, line := range fs.Lines {
+	for i, line := range fs.Commands {
 		cmd, err := ParseCommand(ExpandArgs(line, args))
 		if err != nil {
 			return Stage{}, errf("command %d: %w", i+1, err)
@@ -558,13 +531,13 @@ func (r *Recipe) Graph() string {
 	var b strings.Builder
 	b.WriteString("flowchart TD\n")
 	b.WriteString(fmt.Sprintf("    base[\"base: %s\"]\n", r.Settings.Base))
-	stages := make([]string, 0, len(r.Prepare))
-	for name := range r.Prepare {
+	stages := make([]string, 0, len(r.Stages))
+	for name := range r.Stages {
 		stages = append(stages, name)
 	}
 	sort.Strings(stages)
 	for _, name := range stages {
-		b.WriteString(fmt.Sprintf("    prep_%s[\"prepare %s (from %s)\"]\n", graphID(name), name, r.Prepare[name].From))
+		b.WriteString(fmt.Sprintf("    prep_%s[\"prepare %s (from %s)\"]\n", graphID(name), name, r.Stages[name].From))
 	}
 	prev := "base"
 	for _, ph := range r.Phases {
@@ -701,4 +674,26 @@ func resolveSources(cmd Command, resolve func(string) (string, error)) (Command,
 		return c, nil
 	}
 	return cmd, nil
+}
+
+// setArgs writes build-arg overrides into settings.args of the merged
+// document, so that the resolved recipe builds the same without them.
+func setArgs(root *yaml.Node, buildArgs map[string]string) {
+	if len(buildArgs) == 0 {
+		return
+	}
+	si := indexOf(root, "settings")
+	if si < 0 {
+		return
+	}
+	ai := indexOf(root.Content[si+1], "args")
+	if ai < 0 {
+		return
+	}
+	args := root.Content[si+1].Content[ai+1]
+	for i := 0; i+1 < len(args.Content); i += 2 {
+		if v, ok := buildArgs[args.Content[i].Value]; ok {
+			args.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: v, Style: yaml.DoubleQuotedStyle}
+		}
+	}
 }

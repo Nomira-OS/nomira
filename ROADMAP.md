@@ -5,18 +5,18 @@ to be tried on a real machine. Nothing here is a promise of a date.
 
 ## Planned
 
-### Includes from outside the recipe (frontend)
+### Imports from outside the recipe (frontend)
 
-Groups that many recipes need, network setup or a desktop for instance,
-should be shareable without copying them around. `include:` should
+Parts that many recipes need, network setup or a desktop for instance,
+should be shareable without copying them around. `imports:` should
 therefore also accept:
 
 - an HTTPS URL, pinned by its sha256;
 - an OCI artifact, pinned by digest (`oci://registry/name@sha256:…`).
 
-Open questions: how files that such an include copies are fetched (the
-include's own context next to the recipe's), how Renovate updates the
-pins, and whether included groups may bring prepare stages.
+Open questions: how files that such an import copies are fetched (the
+import's own context next to the recipe's), and how Renovate updates the
+pins.
 
 ### Secure Boot (frontend, CLI, base image)
 
@@ -39,29 +39,17 @@ inherited from the Arch Linux image. Recipes can set
 `org.opencontainers.image.version` in `settings.labels`; a sensible
 default is still open.
 
-### Overrides and layered recipes (frontend)
+### More on imports (frontend, CLI)
 
-Today an include brings a group, a phase or a list of phases, and the
-including file cannot change anything in it. Wanted, in the spirit of
-kustomize:
+Imports merge as JSON Merge Patch (see the README). Still open:
 
-- **Top-level imports:** a recipe imports other recipes (a shared
-  base recipe, a machine-specific one on top). Their contents are merged
-  by key, the last file wins: settings key by key, prepare stages and
-  groups by name, phases by name (keeping the order of the first file
-  that defines a phase; new phases are placed with `before:` or
-  `after:`).
-- **Overrides of single values:** change one setting, one group's
-  package list or one phase's env without restating the rest, and remove
-  something (a group, a package) explicitly rather than by omission.
-- Lists stay lists where order matters. kustomize's strategic merge
-  patch merges lists of named items by their `name`, which fits phases
-  as they are; turning phases into a mapping keyed by name (say under
-  `build:`) would make that merge simpler to write, but YAML gives a
-  mapping no order, so the order would then need its own key. To be
-  decided together with the merge rules.
-- `nomira graph` and `inspect` show the merged recipe and where each
-  value came from.
+- Changing one entry of a list (one command of a group, one package)
+  without restating the list, in the spirit of kustomize's strategic
+  merge patch. Today a list is replaced as a whole.
+- `nomira graph` showing where each phase and group came from, as the
+  resolved recipe already does in its comments.
+- `nomira recipe diff` that shows changes per phase and group rather
+  than as lines.
 
 ### Collectors that build on themselves (frontend)
 

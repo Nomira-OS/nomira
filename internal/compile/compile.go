@@ -29,10 +29,7 @@ import (
 const (
 	// LocalContext is the name of the build-context local source.
 	LocalContext = "context"
-	// LocalRecipe is the local source with the recipe's own files
-	// (BuildKit's name for the frontend's file).
-	LocalRecipe = "dockerfile"
-	defaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	defaultPath  = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 )
 
 // PhasePlan is one compiled phase.
@@ -94,7 +91,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	// a gigabyte and more that no recipe copies from.
 	ctxPaths, ctxAll := r.ContextPaths()
 	ctxOpts := []llb.LocalOption{
-		llb.WithCustomName("[context] load " + describePaths(ctxPaths, ctxAll)),
+		llb.WithCustomName("[load] context: " + describePaths(ctxPaths, ctxAll)),
 		llb.SharedKeyHint(LocalContext),
 		llb.ExcludePatterns(ContextExcludes),
 	}
@@ -102,24 +99,23 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		ctxOpts = append(ctxOpts, llb.IncludePatterns(ctxPaths))
 	}
 	ctxSrc := llb.Local(LocalContext, ctxOpts...)
-	recordAfter := r.RecordPhase()
 
 	// Prepare stages, global and group-local alike. BuildKit builds a stage
 	// when something copies from it; the order here does not matter.
 	// Stages that start from a phase are built once that phase is done.
 	prepare := func(name string, st recipe.Stage, from llb.State) error {
-		state, err := applyCommands(from, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, fmt.Sprintf("prepare %s", name), r.Settings.Volatile)
+		state, err := applyCommands(from, st.Commands, mergeEnv(r.Settings.Env), ctxSrc, b.Stages, "stage "+name, r.Settings.Volatile)
 		if err != nil {
 			return err
 		}
 		b.Stages[name] = state
 		return nil
 	}
-	for name, st := range r.Prepare {
+	for name, st := range r.Stages {
 		if st.FromPhase != "" {
 			continue
 		}
-		if err := prepare(name, st, baseState(st.From, fmt.Sprintf("prepare %s", name))); err != nil {
+		if err := prepare(name, st, baseState(st.From, "stage "+name)); err != nil {
 			return nil, err
 		}
 	}
@@ -133,7 +129,8 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 
 	// Phases.
 	cur := baseState(r.Settings.Base, "base")
-	for _, ph := range r.Phases {
+	for pi, ph := range r.Phases {
+		tag := PhaseTag(r, pi)
 		plan := PhasePlan{
 			Phase:    ph,
 			Input:    cur,
@@ -146,7 +143,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 		if ph.IsCollector() {
 			plan.Output = cur
 			if len(ph.Items) > 0 {
-				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, sources, "collect "+ph.Name, r.Settings.Volatile)
+				out, err := applyCommands(cur, []recipe.Command{*ph.Collect}, env, ctxSrc, sources, tag, r.Settings.Volatile)
 				if err != nil {
 					return nil, err
 				}
@@ -158,7 +155,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			alone := map[string]llb.State{}
 			for _, g := range names {
 				if grp := ph.Groups[g]; !grp.HasRun() {
-					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, sources, fmt.Sprintf("%s/%s", ph.Name, g), r.Settings.Volatile)
+					st, err := applyCommands(llb.Scratch(), grp.Commands, mergeEnv(env), ctxSrc, sources, tag+"/"+g, r.Settings.Volatile)
 					if err != nil {
 						return nil, err
 					}
@@ -173,7 +170,7 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 				}
 			}
 			for _, g := range names {
-				scope := fmt.Sprintf("%s/%s", ph.Name, g)
+				scope := tag + "/" + g
 				if st, ok := alone[g]; ok {
 					reason, no := rejected[g]
 					if !no {
@@ -205,13 +202,13 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 					layer := plan.Uppers[g]
 					if !plan.Isolated[g] {
 						layer = llb.Diff(cur, layer,
-							llb.WithCustomNamef("[%s/%s] diff", ph.Name, g))
+							llb.WithCustomNamef("[%s/%s] diff", tag, g))
 					}
 					plan.Layers[g] = layer
 					merge = append(merge, layer)
 				}
 				plan.Output = llb.Merge(merge,
-					llb.WithCustomNamef("[%s] merge %d groups", ph.Name, len(names)))
+					llb.WithCustomNamef("[%s] merge %d groups", tag, len(names)))
 			}
 		}
 		if hooks.PhaseDone != nil {
@@ -220,11 +217,8 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 			}
 		}
 		cur = plan.Output
-		if len(b.Phases) == recordAfter {
-			cur = record(cur, r, ctxSrc, len(ctxPaths) > 0 || ctxAll)
-		}
 		sources[ph.Name] = cur
-		for name, st := range r.Prepare {
+		for name, st := range r.Stages {
 			if st.FromPhase != ph.Name {
 				continue
 			}
@@ -239,32 +233,6 @@ func Compile(r *recipe.Recipe, hooks Hooks) (*Build, error) {
 	return b, nil
 }
 
-// record adds the recipe to the image, below recipe.RecordDir: its own
-// files from the recipe source, and what its copy commands take from the
-// build context. Owner root, so the record is the same whoever builds it.
-func record(st llb.State, r *recipe.Recipe, ctxSrc llb.State, withContext bool) llb.State {
-	files := llb.Local(LocalRecipe,
-		llb.IncludePatterns(r.Files),
-		llb.ExcludePatterns(ContextExcludes),
-		llb.WithCustomName("[record] load "+strings.Join(r.Files, " ")),
-	)
-	info := func() *llb.CopyInfo {
-		return &llb.CopyInfo{
-			CreateDestPath:      true,
-			CopyDirContentsOnly: true,
-			ChownOpt: &llb.ChownOpt{
-				User:  &llb.UserOpt{UID: 0},
-				Group: &llb.UserOpt{UID: 0},
-			},
-		}
-	}
-	fa := llb.Copy(files, "/", recipe.RecordDir+"/", info())
-	if withContext {
-		fa = fa.Copy(ctxSrc, "/", recipe.RecordDir+"/", info())
-	}
-	return st.File(fa, llb.WithCustomName("[record] recipe -> "+recipe.RecordDir))
-}
-
 // describePaths names what is loaded from the build context.
 func describePaths(paths []string, all bool) string {
 	switch {
@@ -277,7 +245,7 @@ func describePaths(paths []string, all bool) string {
 }
 
 func baseState(ref, name string) llb.State {
-	return llb.Image(ref, llb.WithCustomNamef("[%s] from %s", name, ref)).
+	return llb.Image(ref, llb.WithCustomNamef("[%s] %s", name, ref)).
 		AddEnv("PATH", defaultPath)
 }
 
@@ -344,8 +312,7 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 					// No content-based cache key: BuildKit would checksum every file
 					// of the mounted tree, a whole system for a UKI, on every build
 					// in which it changed. Its LLB definition identifies it as well.
-					opts = append(opts, llb.AddMount(m.Target, src, llb.SourcePath(m.Source), llb.Readonly,
-						llb.ContentCache(llb.MountContentCacheOff)))
+					opts = append(opts, llb.AddMount(m.Target, src, llb.SourcePath(m.Source), llb.Readonly, noContentCache))
 					continue
 				}
 				sharing := llb.CacheMountShared
@@ -402,7 +369,7 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 				}
 				st = st.File(
 					llb.Copy(src, sp, cmd.Dst, info),
-					llb.WithCustomNamef("[%s] copy %s -> %s", scope, sp, cmd.Dst),
+					llb.WithCustomNamef("[%s] copy %s %s", scope, sp, cmd.Dst),
 				)
 			}
 		default:
@@ -412,13 +379,20 @@ func applyCommands(st llb.State, cmds []recipe.Command, env map[string]string, c
 	return st, nil
 }
 
+// PhaseTag names phase i in step names: its position and name, "2/6
+// features", so that every line of the build output says how far along
+// the build is.
+func PhaseTag(r *recipe.Recipe, i int) string {
+	return fmt.Sprintf("%d/%d %s", i+1, len(r.Phases), r.Phases[i].Name)
+}
+
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i] + " …"
 	}
-	if len(s) > 60 {
-		s = s[:57] + "…"
+	if len(s) > 72 {
+		s = s[:71] + "…"
 	}
 	return s
 }

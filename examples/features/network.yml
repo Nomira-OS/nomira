@@ -1,5 +1,11 @@
-# NetworkManager with the connections kept in the recipe.
-packages: [networkmanager]
-services: [NetworkManager.service]
-commands:
-  - copy --chmod=0600 files/nm/ /etc/NetworkManager/system-connections/
+# NetworkManager with the connections kept in the recipe. A feature is a
+# part of a recipe: it adds a group to the phase features, and its
+# packages and services to the collectors of those names.
+build:
+  features:
+    groups:
+      network:
+        packages: [networkmanager]
+        services: [NetworkManager.service]
+        commands:
+          - copy --chmod=0600 files/nm/ /etc/NetworkManager/system-connections/

@@ -1,5 +1,9 @@
 # kmscon as the console on tty1.
-packages: [kmscon]
-services: [kmsconvt@tty1.service]
-commands:
-  - copy --chmod=0644 files/kmscon/ /etc/kmscon/
+build:
+  features:
+    groups:
+      terminal:
+        packages: [kmscon]
+        services: [kmsconvt@tty1.service]
+        commands:
+          - copy --chmod=0644 files/kmscon/ /etc/kmscon/

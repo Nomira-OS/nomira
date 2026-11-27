@@ -13,10 +13,10 @@ import (
 
 const src = `
 settings: {base: docker.io/library/alpine:3.22}
-phases:
-  - name: packages
+build:
+  packages:
     collect: run apk add ${items}
-  - name: features
+  features:
     groups:
       copies:
         - copy files/a /etc/a
@@ -26,9 +26,9 @@ phases:
           - run echo b > /etc/b
       only-contributes:
         tools: [jq]
-  - name: tools
+  tools:
     collect: run apk add ${items}
-  - name: single
+  single:
     groups:
       alone:
         - copy files/c /etc/c

@@ -52,8 +52,8 @@ kept as a record; this README is authoritative.
 settings:
   name: test
   base: docker.io/library/alpine:3.22
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo a > /etc/a"]
       b: ["run echo b > /etc/b"]
@@ -89,20 +89,20 @@ settings:
   secrets:                                  # secret id: file on the build machine
     db.key: /etc/kernel/secureboot/db.key
   source_date_epoch: 1794268800             # seconds | true (default: the base image's time) | false
-  record: true                              # the recipe in /usr/share/nomira/recipe, see below
+  record: true                              # the resolved recipe as the label org.nomira.recipe
   volatile: [/run, /tmp, /var/cache, /var/log, /var/tmp]   # the default, see below
 
-prepare:                                    # optional named stages (multi-stage)
+stages:                                     # optional named stages (multi-stage)
   aurbuild:
     from: docker.io/library/archlinux:base-devel
     commands:
       - run --no-cache git clone https://aur.archlinux.org/example.git /src
 
-phases:                                     # list: order matters
-  - name: packages                          # a collector, see below
+build:                                      # the phases, by name; their order matters
+  packages:                                 # a collector, see below
     collect: run --mount=type=cache,target=/var/cache/pacman/pkg pacman -S --needed --noconfirm ${items}
 
-  - name: features
+  features:
     validation: allow-identical             # a phase overrides the default
     shared: [/usr/lib/tmpfiles.d/]          # allowlist (suffix "/" = prefix)
     env: {MAKEFLAGS: -j4}                   # environment for this phase
@@ -113,7 +113,7 @@ phases:                                     # list: order matters
         packages: [kmscon]                  # contribution to the phase "packages"
         services: [kmsconvt@tty1.service]   # contribution to the phase "services"
         expects: [/usr/lib/systemd/system/kmsconvt@.service]
-        prepare:                            # stages that only this group uses
+        stages:                             # stages that only this group uses
           theme:
             from: docker.io/library/alpine:3.22
             commands: [run mkdir /out && echo dark > /out/theme.conf]
@@ -123,9 +123,12 @@ phases:                                     # list: order matters
       aur:
         - copy --from=aurbuild /out/ /usr/lib/aur/
 
-  - name: services
+  services:
     collect: run systemctl enable ${items}
 ```
+
+A recipe can start with `imports:`, other recipe files merged into it;
+see [Imports](#imports).
 
 Commands are strings that start with a verb (use a YAML block scalar for
 several lines):
@@ -145,11 +148,11 @@ phase to its groups, the `env` command to the rest of its group. The more
 specific one wins. The variables exist only during the build and do not
 end up in the image configuration.
 
-**`from=` and `--from=`** name a prepare stage or a phase that comes
+**`from=` and `--from=`** name a stage or a phase that comes
 earlier; a phase stands for the system as it is after that phase. A bind
 mount is read-only and never ends up in the image.
 
-**A prepare stage can start from a phase** (`from: packages`): it is
+**A stage can start from a phase** (`from: packages`): it is
 built from the system after that phase, is cached as long as that phase
 is, and only phases after it can use it. Nothing of it ends up in the
 image unless a later phase copies it.
@@ -161,12 +164,12 @@ it changes, so the recipe only takes kernel and initramfs out of the image
 and builds the UKI from the system without them:
 
 ```yaml
-phases:
+build:
   # … packages, features, services …
-  - name: kernel
+  kernel:
     groups:
       out: ["run rm /usr/lib/modules/*/vmlinuz /usr/lib/modules/*/initramfs.img"]
-  - name: uki
+  uki:
     groups:
       uki:
         - >-
@@ -188,8 +191,8 @@ passes those files to BuildKit (`buildctl --secret`).
 
 **`run --no-cache`:** The step always runs, even if BuildKit has it in its
 cache. Everything that builds on it then runs again: the rest of its group
-and all following phases. Such steps therefore belong in a `prepare`
-stage, or in a group of their own as late as possible.
+and all following phases. Such steps therefore belong in a stage, or in
+a group of their own as late as possible.
 
 **`source_date_epoch`:** Every `run` sees it as `SOURCE_DATE_EPOCH`
 (dracut, for one, then builds the same initramfs every time), and the
@@ -201,17 +204,16 @@ time of the base image, so a recipe builds the same image every time
 from the same base. `source_date_epoch: false` turns all of that off:
 no variable, the build time as creation time, file times as they are.
 
-**`record`:** The image carries the recipe it was built from, below
-`/usr/share/nomira/recipe`: the entry file, every included file and what
-the `copy` commands take from the build context, at their paths relative
-to the recipe directory. Being below `/usr` it is part of the read-only,
-verified image, and local changes cannot make it lie. The record is added
-after the last phase before the first one that reads an earlier phase (a
-bind mount or copy from it, or a prepare stage that starts from it), so
-that what such a phase derives from the image, a UKI with its digest for
-instance, covers it; without such a phase, after the last one.
-As late as that, a change to the recipe only rebuilds what comes after
-it. `record: false` leaves it out.
+**`record`:** The image carries the recipe it was built from in its label
+`org.nomira.recipe`: resolved, with all imports merged, so that it
+describes the build by itself and later changes to imported files cannot
+change it. Comments name the file each setting, stage, phase and group
+came from. The label is part of the image's config and with it of the
+image digest and its signature; it is no layer, so changing only the
+recipe rebuilds no step. `nomira recipe export` writes it to a file,
+`nomira recipe diff` compares two recipes. Files that `copy` takes from
+the recipe directory are not in the label; they are in the image where
+they were copied to. `record: false` leaves the label out.
 
 **`volatile`:** Every `run` gets an empty tmpfs at these paths, so
 nothing written there ends up in the image: logs, caches, temporary
@@ -224,7 +226,7 @@ takes its place, and mounts below them, a package cache in
 it off; a list replaces the default.
 
 **What is loaded:** From the recipe directory the frontend reads only the
-entry file and the files it includes, one by one as it meets them, and
+entry file and the files it imports, one by one as it meets them, and
 from the build context only what `copy` commands name. Anything else in
 the directory never leaves the machine, and `.nomira/` (the CLI's build
 output) is always left out.
@@ -239,14 +241,13 @@ in the recipe, not in command line flags.
 ## Groups
 
 A group is written in one of two forms. The short form is a list of
-commands. The long form is a mapping; four keys have a fixed meaning:
+commands. The long form is a mapping; three keys have a fixed meaning:
 
 | Key | Meaning |
 |---|---|
 | `commands` | The list of commands |
-| `prepare` | Stages that belong to this group. Their names are local to it and win over stages of the same name at the top |
+| `stages` | Stages that belong to this group. Their names are local to it and win over stages of the same name at the top |
 | `expects` | Paths that must exist in the state the phase starts from |
-| `include` | Read the group from a file; no other key next to it |
 
 Every other key is a **contribution** to the collector phase of that
 name. A group may consist of contributions alone.
@@ -265,15 +266,16 @@ independent. A collector solves this: a phase with `collect` instead of
 groups of the recipe contributed under the name of the phase.
 
 ```yaml
-- name: packages
-  collect: run pacman -S --needed --noconfirm ${items}
+build:
+  packages:
+    collect: run pacman -S --needed --noconfirm ${items}
 ```
 
 - The frontend knows nothing about package managers or services. A
   collector is whatever command you give it; a recipe on another
   distribution uses `dnf install` in the same place.
 - Contributions come from groups of any phase, also later ones. Where the
-  collector stands in the list of phases decides when it runs.
+  collector stands among the phases decides when it runs.
 - Items are sorted and de-duplicated, so the command does not depend on
   the order of groups or files. A collector without items is skipped.
 - An item is a single word of letters, digits and `@%+=:,./_-`, and does
@@ -289,13 +291,13 @@ A group that uses `run` is executed on the state before it. A new base
 image, or a change in an earlier phase, therefore runs it again.
 
 A group without `run` only copies files, from the recipe directory or
-from a `prepare` stage. The frontend builds it apart from the state
+from a stage. The frontend builds it apart from the state
 before it and merges the result, the way `COPY --link` works in a
 Dockerfile. Its cache then depends only on what it copies.
 
-The goal for a recipe is therefore: **`run` in `prepare` stages and
-collectors, copies in groups.** A script that generates a file runs in a
-`prepare` stage with its own image; the group copies the result.
+The goal for a recipe is therefore: **`run` in stages and collectors,
+copies in groups.** A script that generates a file runs in a stage with
+its own image; the group copies the result.
 
 Building apart is only done where it gives the same result. On every
 build a check compares the group with the state before it and falls back
@@ -311,45 +313,62 @@ cost is easy to miss, the steps of such a group say so in the output of
 every build, also when they come from the cache:
 
 ```text
-[features/sudo, WARNING: not independent of earlier state: /etc/sudoers.d has mode.uid.gid 750.0.0 there, not 755.0.0] copy files/sudoers-wheel -> /etc/sudoers.d/10-wheel
+[2/3 features/sudo, WARNING: not independent of earlier state: /etc/sudoers.d has mode.uid.gid 750.0.0 there, not 755.0.0] copy files/sudoers-wheel /etc/sudoers.d/10-wheel
 ```
 
-## Splitting a recipe across files
+## Imports
 
-A recipe has one entry file. `include: <file>` can stand in place of a
-phase, a group or a list of commands and is replaced by the content of
-the file. Paths are relative to the including file and must stay inside
-the recipe directory. Included files may include further files; cycles
-are an error.
+A recipe can be split across files, and recipes can share parts.
+`imports:` at the top of a file lists further recipe files, by paths
+relative to that file and inside the recipe directory. Each is a recipe
+or a part of one and may import further files; a cycle is an error.
 
 ```yaml
-phases:
-  - include: phases/base.yml                # one phase or a list of phases
-  - name: features
+# recipe.yml
+imports:
+  - base.yml               # shared by all my machines
+  - features/terminal.yml  # one feature
+settings:
+  name: laptop
+build:
+  features:
     groups:
-      terminal: {include: features/terminal.yml}   # a group, short or long form
-      aur:
-        prepare:
-          build:
-            from: docker.io/library/archlinux:base-devel
-            commands: {include: stages/aur.yml}     # a list of commands
-        commands:
-          - copy --from=build /out/ /usr/lib/aur/
+      network: null        # base.yml has it; this machine does not
 ```
-
-A group file in the long form brings everything the feature needs:
 
 ```yaml
-# features/terminal.yml
-packages: [kmscon]
-services: [kmsconvt@tty1.service]
-commands:
-  - copy --chmod=0644 files/kmscon/ /etc/kmscon/
+# features/terminal.yml: a feature is a part of a recipe
+build:
+  features:
+    groups:
+      terminal:
+        packages: [kmscon]
+        services: [kmsconvt@tty1.service]
+        commands:
+          - copy --chmod=0644 files/kmscon/ /etc/kmscon/
 ```
 
-`settings` exists only in the entry file. Source paths of `copy` always
-refer to the build context, not to the included file. `examples/` has a
-recipe laid out this way.
+The files are merged into one recipe: the imports in the order listed,
+each after its own imports, and the importing file last. The rules are
+those of JSON Merge Patch (RFC 7386):
+
+- **Mappings are merged** key by key: settings, labels, env, stages,
+  phases, groups.
+- **Everything else is replaced** by the later file: strings, numbers,
+  and lists (a group's commands or packages, `settings.tags`).
+- **`key: null` removes** a key: a group, a stage, a phase, a label.
+
+The first file that names a key decides its place; keys new in a later
+file come after it. Phases are the exception, since their order matters:
+a new phase goes after the phase that comes before it in its own file, or
+before the next one it names if it is the first there, so an import can
+add `firmware` in front of `packages`. Two files that order the same
+phases differently are an error.
+
+Source paths of `copy` always refer to the build context, the recipe
+directory, not to the importing file. `nomira-frontend resolve` (and
+`nomira recipe export` on an image) shows the merged result.
+`examples/` has a recipe laid out this way.
 
 ## Building a recipe
 
@@ -421,6 +440,7 @@ does not have to reimplement schema validation and the graph:
 nomira-frontend lint  recipe.yml     # parse + schema; exit 1 with errors
 nomira-frontend graph recipe.yml     # pipeline as a Mermaid flowchart
 nomira-frontend inspect recipe.yml   # name, base, phases and groups as JSON
+nomira-frontend resolve recipe.yml   # the recipe with all imports merged
 podman run --rm -i ghcr.io/nomira-os/nomira:1-alpha lint - < recipe.yml
 ```
 
@@ -445,7 +465,7 @@ Tests come in three layers:
   scripts the build uses against synthetic trees.
 - `hack/e2e.sh` builds small recipes with a real BuildKit and checks the
   results: conflicts between writes and deletions, the policies,
-  collectors, includes and group-local stages, `expects`, that a group
+  collectors, imports and group-local stages, `expects`, that a group
   without `run` comes from the cache after a change of the base image,
   and that the fallback keeps symbolic links and directory modes intact.
   CI runs it on every push; the header of the script says what it needs
@@ -468,7 +488,7 @@ Tests come in three layers:
   only run again when the group or the state before it changed.
 - `copy` does not support paths with spaces on the command line (the
   validation itself does); `--chown` is numeric only.
-- `copy --from` inside a `prepare` stage is not supported yet.
+- `copy --from` inside a stage is not supported yet.
 - The lister does not yet record xattrs and hard links as writes of their
   own.
 - The checks need a toolbox image with busybox tools

@@ -94,12 +94,31 @@ notcached() {
   ! grep -F -A1 -- "$2" "$work/$1/log" | grep -q 'CACHED' || fail "cached, expected a rebuild: $2"
 }
 
+# oci <case> [exporter options] : builds $work/<case> as an OCI image into
+# img/ and sets $manifest and $config to its blobs. Plain tools only: the
+# CI runs this script in the BuildKit image. The first digest in the index
+# is the manifest's, and in the manifest the config's comes first.
+oci() {
+  d="$work/$1"
+  rm -rf "$d/img" "$d/img.tar"
+  buildctl build \
+    --frontend gateway.v0 --opt source="$FRONTEND" \
+    --local context="$d" --local dockerfile="$d" --opt filename=recipe.yml \
+    --output "type=oci,dest=$d/img.tar,compression=gzip${2:+,$2}" \
+    --progress=plain > "$d/log" 2>&1 || { fail "oci export failed"; tail -n 20 "$d/log"; return 1; }
+  mkdir "$d/img" && tar -xf "$d/img.tar" -C "$d/img"
+  manifest="$(blob "$d" "$(digests "$d/img/index.json" | head -n 1)")"
+  config="$(blob "$d" "$(digests "$manifest" | head -n 1)")"
+}
+blob() { echo "$1/img/blobs/sha256/${2#sha256:}"; }
+digests() { grep -o '"digest": *"sha256:[0-9a-f]*"' "$1" | grep -o 'sha256:[0-9a-f]*'; }
+
 # ---- cases -------------------------------------------------------------
 
 case_tmpfs_mount() {
   recipe tmpfs_mount <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run --mount=type=tmpfs,target=/scratch echo x > /scratch/f && cp /scratch/f /etc/from-tmpfs"]
 EOF
@@ -110,8 +129,8 @@ EOF
 
 case_context_excludes_output() {
   recipe context_excludes_output <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["copy .nomira/big /big"]
 EOF
@@ -125,29 +144,27 @@ EOF
 # the initramfs and the file list of the root file system it was given.
 case_uki() {
   recipe uki <<'EOF'
-phases:
-  - name: system
+build:
+  system:
     groups:
       fake:
         - copy --chmod=0755 files/bootc /usr/bin/bootc
         - run mkdir -p /usr/lib/modules/7.0 && echo kernel > /usr/lib/modules/7.0/vmlinuz && echo initrd > /usr/lib/modules/7.0/initramfs.img && echo dep > /usr/lib/modules/7.0/modules.dep
-  - name: kernel
+  kernel:
     groups:
       out: ["run rm /usr/lib/modules/*/vmlinuz /usr/lib/modules/*/initramfs.img"]
-  - name: uki
+  uki:
     groups:
       uki:
         - run --mount=type=bind,from=kernel,target=/target --mount=type=bind,from=system,source=/usr/lib/modules,target=/kernels mkdir -p /boot/EFI/Linux && for d in /kernels/*; do bootc container ukify --rootfs /target --kernel-dir "$d" -- --output "/boot/EFI/Linux/$(basename "$d").efi"; done
 EOF
   # The fake ukify writes kernel, initramfs and the tree below
-  # /usr/lib/modules into the "UKI", and whether the record is in the tree
-  # it was given: the digest must cover the record.
+  # /usr/lib/modules into the "UKI".
   cat > "$work/uki/files/bootc" <<'EOF'
 #!/bin/sh
 set -eu
 [ "$1 $2" = "container ukify" ] || exit 2
-{ cat "$6/vmlinuz" "$6/initramfs.img"; find "$4/usr/lib/modules" | sed "s|^$4||" | sort;
-  [ -f "$4/usr/share/nomira/recipe/recipe.yml" ] && echo record; } > "$9"
+{ cat "$6/vmlinuz" "$6/initramfs.img"; find "$4/usr/lib/modules" | sed "s|^$4||" | sort; } > "$9"
 EOF
   must_build uki || return 0
   has uki usr/lib/modules/7.0/modules.dep dep
@@ -156,43 +173,45 @@ EOF
   hasnot uki kernels
   efi="$work/uki/out/boot/EFI/Linux/7.0.efi"
   [ -f "$efi" ] || { fail "no UKI"; return 0; }
-  expected="$(printf 'kernel\ninitrd\n/usr/lib/modules\n/usr/lib/modules/7.0\n/usr/lib/modules/7.0/modules.dep\nrecord')"
+  expected="$(printf 'kernel\ninitrd\n/usr/lib/modules\n/usr/lib/modules/7.0\n/usr/lib/modules/7.0/modules.dep')"
   [ "$(cat "$efi")" = "$expected" ] || fail "UKI content: $(cat "$efi")"
 }
 
-# The recipe goes into the image: its files and what its copies take from
-# the context, nothing else. The context holds only what copies name.
+# The image carries the resolved recipe in its label org.nomira.recipe,
+# with the imports merged. The context holds only what copies name.
 case_record() {
   recipe record <<'EOF'
-phases:
-  - name: content
+imports: [groups/a.yml]
+build:
+  content:
     groups:
-      a: {include: groups/a.yml}
+      b: ["run echo b > /etc/b"]
 EOF
   mkdir -p "$work/record/groups"
-  echo '- copy files/a /etc/a' > "$work/record/groups/a.yml"
+  printf 'build:\n  content:\n    groups:\n      a: ["copy files/a /etc/a"]\n' > "$work/record/groups/a.yml"
   echo a > "$work/record/files/a"
   echo secret > "$work/record/files/unused"
   echo '{}' > "$work/record/unused.yml"
   must_build record || return 0
   has record etc/a a
-  has record usr/share/nomira/recipe/recipe.yml
-  has record usr/share/nomira/recipe/groups/a.yml '- copy files/a /etc/a'
-  has record usr/share/nomira/recipe/files/a a
-  hasnot record usr/share/nomira/recipe/files/unused
-  hasnot record usr/share/nomira/recipe/unused.yml
-  logged record 'context] load files/a$'
+  has record etc/b b
+  hasnot record usr/share/nomira
+  logged record 'load] context: files/a$'
   notlogged record 'unused'
+  oci record || return 0
+  grep -q '"org.nomira.recipe"' "$config" || { fail "no label org.nomira.recipe"; return 0; }
+  grep -q 'copy files/a /etc/a' "$config" || fail "the label lacks the imported group"
+  grep -q 'from groups/a.yml' "$config" || fail "the label does not say where the group came from"
+  ! grep -q 'imports:' "$config" || fail "the label still has imports"
 
   RECIPE_SETTINGS="record: false" recipe record_off <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo x > /etc/x"]
 EOF
-  must_build record_off || return 0
-  has record_off etc/x x
-  hasnot record_off usr/share/nomira
+  oci record_off || return 0
+  ! grep -q 'org.nomira.recipe' "$config" || fail "label despite record: false"
 }
 
 # Every run sees settings.source_date_epoch, and the exported image is
@@ -200,29 +219,17 @@ EOF
 # layers.
 case_source_date_epoch() {
   RECIPE_SETTINGS="source_date_epoch: 1234" recipe epoch <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo $SOURCE_DATE_EPOCH > /etc/epoch"]
 EOF
   must_build epoch || return 0
   has epoch etc/epoch 1234
-  d="$work/epoch"
-  buildctl build \
-    --frontend gateway.v0 --opt source="$FRONTEND" \
-    --local context="$d" --local dockerfile="$d" --opt filename=recipe.yml \
-    --output type=oci,dest="$d/img.tar",compression=gzip,rewrite-timestamp=true \
-    --progress=plain > "$d/log" 2>&1 || { fail "oci export failed"; tail -n 20 "$d/log"; return 0; }
-  mkdir "$d/img" && tar -xf "$d/img.tar" -C "$d/img"
-  # Plain tools only: the CI runs this script in the BuildKit image. The
-  # first digest in the index is the manifest's, in the manifest the
-  # config's comes first and the last layer's last; Go writes the keys of
-  # the config sorted, so its first "created" is the image's.
-  blob() { echo "$d/img/blobs/sha256/${1#sha256:}"; }
-  digests() { grep -o '"digest": *"sha256:[0-9a-f]*"' "$1" | grep -o 'sha256:[0-9a-f]*'; }
-  manifest="$(blob "$(digests "$d/img/index.json" | head -n 1)")"
-  config="$(blob "$(digests "$manifest" | head -n 1)")"
-  layer="$(blob "$(digests "$manifest" | tail -n 1)")"
+  oci epoch rewrite-timestamp=true || return 0
+  # Go writes the keys of the config sorted, so its first "created" is
+  # the image's.
+  layer="$(blob "$d" "$(digests "$manifest" | tail -n 1)")"
   created="$(grep -o '"created": *"[^"]*"' "$config" | head -n 1 | sed 's/.*: *"//; s/"$//')"
   mkdir "$d/layer" && tar -xzf "$layer" -C "$d/layer"
   newest="$(find "$d/layer" -type f -exec stat -c %Y {} + | sort -n | tail -n 1)"
@@ -234,8 +241,8 @@ EOF
 # gets a tmpfs at the volatile paths, unless the recipe empties the list.
 case_volatile() {
   recipe volatile <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo l > /var/log/build.log && echo t > /tmp/t && mkdir -p /var/cache/x && echo c > /var/cache/x/c && echo kept > /etc/kept"]
 EOF
@@ -247,8 +254,8 @@ EOF
 
   # A cache mount below a volatile path still works.
   recipe volatile_cache <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run --mount=type=cache,target=/var/cache/pkg,id=e2e-volatile echo x > /var/cache/pkg/f && cat /var/cache/pkg/f > /etc/nested"]
 EOF
@@ -257,8 +264,8 @@ EOF
   hasnot volatile_cache var/cache/pkg/f
 
   RECIPE_SETTINGS="volatile: []" recipe volatile_off <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo l > /var/log/build.log"]
 EOF
@@ -267,8 +274,8 @@ EOF
 
   # Without a source date epoch, runs do not see SOURCE_DATE_EPOCH.
   RECIPE_SETTINGS="source_date_epoch: false" recipe epoch_off <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo \"[${SOURCE_DATE_EPOCH:-}]\" > /etc/epoch"]
 EOF
@@ -278,8 +285,8 @@ EOF
 
 case_secret_mount() {
   RECIPE_SETTINGS="secrets: {tok: tok}" recipe secret_mount <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run --mount=type=secret,id=tok,required=true wc -c < /run/secrets/tok | tr -d ' ' > /etc/tok-size"]
 EOF
@@ -290,8 +297,8 @@ EOF
   # A required secret that is not given fails the build. (A cached step
   # would not notice: the secret is not part of the cache key.)
   RECIPE_SETTINGS="secrets: {tok: tok}" recipe secret_missing <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run --mount=type=secret,id=tok,required=true echo missing-$nonce > /etc/x"]
 EOF
@@ -299,23 +306,23 @@ EOF
   must_fail secret_missing "tok"
 }
 
-# A prepare stage that starts from a phase: built from the system after
+# A stage that starts from a phase: built from the system after
 # that phase, cached as long as that phase is, never part of the image.
 case_stage_from_phase() {
   recipe stage_from_phase <<'EOF'
-prepare:
+stages:
   derived:
     from: packages
     commands:
       - run mkdir /out && cat /etc/pkgs > /out/derived
-phases:
-  - name: packages
+build:
+  packages:
     groups:
       p: ["run echo pkgs-NONCE > /etc/pkgs"]
-  - name: config
+  config:
     groups:
       c: ["copy files/conf /etc/conf"]
-  - name: use
+  use:
     groups:
       u: ["run --mount=type=bind,from=derived,source=/out,target=/d cp /d/derived /etc/derived"]
 EOF
@@ -329,13 +336,13 @@ EOF
   echo two > "$work/stage_from_phase/files/conf"
   must_build stage_from_phase || return 0
   has stage_from_phase etc/conf two
-  cached stage_from_phase '[prepare derived] run mkdir /out'
+  cached stage_from_phase '[stage derived] run mkdir /out'
 }
 
 case_groups_merge() {
   recipe groups_merge <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo a > /etc/a"]
       b: ["run echo b > /etc/b"]
@@ -348,8 +355,8 @@ EOF
 
 case_conflict_write() {
   recipe conflict_write <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run echo a > /etc/a"]
       b: ["run echo b > /etc/a"]
@@ -362,8 +369,8 @@ case_conflict_delete() {
   # One group deletes what the other writes. A layer mounted on its own
   # does not show deletions; they are found by walking the trees.
   recipe conflict_delete <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run rm /etc/hostname"]
       b: ["run echo x > /etc/hostname"]
@@ -375,8 +382,8 @@ EOF
 case_conflict_delete_dir() {
   # Deleting a directory collides with a write below it.
   recipe conflict_delete_dir <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run rm -rf /etc/apk"]
       b: ["run echo x > /etc/apk/new"]
@@ -387,8 +394,8 @@ EOF
 case_conflict_isolated() {
   # A group without run against a group with run.
   recipe conflict_isolated <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["copy files/a /etc/a"]
       b: ["run echo b > /etc/a"]
@@ -399,8 +406,8 @@ EOF
 
 case_delete_alone_is_fine() {
   recipe delete_alone <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run rm /etc/hostname"]
       b: ["run echo b > /etc/b"]
@@ -412,8 +419,8 @@ EOF
 
 case_allow_identical() {
   recipe allow_identical <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     validation: allow-identical
     groups:
       a: ["run echo same > /etc/same"]
@@ -425,8 +432,8 @@ EOF
 
 case_shared() {
   recipe shared <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     shared: [/etc/shared/]
     groups:
       a: ["run mkdir -p /etc/shared && echo a > /etc/shared/f"]
@@ -440,8 +447,8 @@ case_rewrite_counts_as_write() {
   # A file rewritten with the same content is in the group's layer and
   # would cover a sibling's change, so it is a conflict under strict.
   recipe rewrite <<'EOF'
-phases:
-  - name: content
+build:
+  content:
     groups:
       a: ["run cp /etc/hostname /tmp/h && cat /tmp/h > /etc/hostname && rm /tmp/h"]
       b: ["run echo changed > /etc/hostname"]
@@ -452,11 +459,11 @@ EOF
 case_serial_phases() {
   # A later phase sees the result of an earlier one.
   recipe serial <<'EOF'
-phases:
-  - name: one
+build:
+  one:
     groups:
       a: ["run echo 1 > /etc/n"]
-  - name: two
+  two:
     groups:
       a: ["run echo $(( $(cat /etc/n) + 1 )) > /etc/n"]
       b: ["run cp /etc/n /etc/seen"]
@@ -468,10 +475,10 @@ EOF
 
 case_collectors() {
   recipe collectors <<'EOF'
-phases:
-  - name: words
+build:
+  words:
     collect: run for w in ${items}; do echo "$w" >> /etc/words; done
-  - name: features
+  features:
     groups:
       one:
         words: [pear, apple]
@@ -480,9 +487,9 @@ phases:
       two:
         words: [apple, fig]
       three: ["run test -f /etc/words && echo ok > /etc/three"]
-  - name: later
+  later:
     collect: run cat /etc/one > /etc/later && echo ${items} >> /etc/later
-  - name: nobody
+  nobody:
     collect: run echo ${items} > /etc/nobody
 EOF
   echo f > "$work/collectors/files/f"
@@ -496,40 +503,42 @@ x"
   hasnot collectors etc/nobody
 }
 
-case_long_form_and_includes() {
+case_long_form_and_imports() {
   recipe long_form <<EOF
-prepare:
+imports: [features/feature.yml, phases/last.yml]
+stages:
   shared:
     from: ${BASE}
     commands: ["run mkdir /out && echo shared > /out/s"]
-phases:
-  - name: features
+build:
+  features:
     groups:
-      feature: {include: features/feature.yml}
       other:
-        prepare:
+        stages:
           gen:
             from: ${BASE}
             commands: ["run mkdir /out && echo other > /out/g"]
         commands:
           - copy --from=gen /out/g /etc/other
-  - include: phases/last.yml
 EOF
   mkdir -p "$work/long_form/features" "$work/long_form/phases"
   cat > "$work/long_form/features/feature.yml" <<EOF
-expects: [/etc/alpine-release]
-prepare:
-  gen:
-    from: ${BASE}
-    commands: {include: gen.yml}
-commands:
-  - env GREETING=hello
-  - copy --chmod=0600 files/f /etc/feature/f
-  - copy --from=gen /out/g /etc/feature/generated
-  - copy --from=shared /out/s /etc/feature/shared
+build:
+  features:
+    groups:
+      feature:
+        expects: [/etc/alpine-release]
+        stages:
+          gen:
+            from: ${BASE}
+            commands: ["run mkdir /out && echo feature > /out/g"]
+        commands:
+          - env GREETING=hello
+          - copy --chmod=0600 files/f /etc/feature/f
+          - copy --from=gen /out/g /etc/feature/generated
+          - copy --from=shared /out/s /etc/feature/shared
 EOF
-  printf -- '- run mkdir /out && echo feature > /out/g\n' > "$work/long_form/features/gen.yml"
-  printf -- 'name: last\ngroups:\n  a:\n    - env WHO=nomira\n    - run echo "hi $WHO" > /etc/last\n' > "$work/long_form/phases/last.yml"
+  printf 'build:\n  last:\n    groups:\n      a:\n        - env WHO=nomira\n        - run echo "hi $WHO" > /etc/last\n' > "$work/long_form/phases/last.yml"
   echo f > "$work/long_form/files/f"
   must_build long_form || return 0
   has long_form etc/feature/f f
@@ -543,8 +552,8 @@ EOF
 
 case_expects() {
   recipe expects <<'EOF'
-phases:
-  - name: features
+build:
+  features:
     groups:
       a:
         expects: [/etc/alpine-release, /etc/does-not-exist]
@@ -561,8 +570,8 @@ case_independent_of_base() {
   # The nonce keeps a cache left by an earlier run of this script from
   # answering for the group with run.
   nonce="$(date +%s)-$$"
-  body="phases:
-  - name: features
+  body="build:
+  features:
     groups:
       copies:
         - copy files/f /etc/copied
@@ -581,19 +590,19 @@ case_independent_of_base() {
   must_build indep || return 0
   has indep etc/copied f
   has indep etc/ran "$nonce"
-  cached indep '[features/copies] copy files/f -> /etc/copied'
-  notcached indep "[features/runs] run echo $nonce > /etc/ran"
+  cached indep '[1/1 features/copies] copy files/f /etc/copied'
+  notcached indep "[1/1 features/runs] run echo $nonce > /etc/ran"
 }
 
 case_fallback_symlink() {
   # Copying below a symbolic link: the group is built on the state before
   # it, the file follows the link, and the build says so.
   recipe fb_symlink <<'EOF'
-phases:
-  - name: prepare-system
+build:
+  prepare-system:
     groups:
       a: ["run mkdir /real && ln -s real /link"]
-  - name: features
+  features:
     groups:
       viaLink: ["copy files/f /link/f"]
       plain: ["copy files/f /etc/plain"]
@@ -610,11 +619,11 @@ EOF
 case_fallback_mode() {
   # Copying into a directory with its own mode: the mode must survive.
   recipe fb_mode <<'EOF'
-phases:
-  - name: prepare-system
+build:
+  prepare-system:
     groups:
       a: ["run mkdir -m 750 /etc/strict"]
-  - name: features
+  features:
     groups:
       intoStrict: ["copy files/f /etc/strict/f"]
 EOF
@@ -630,11 +639,11 @@ EOF
 case_fallback_type() {
   # A file where the state before has a directory.
   recipe fb_type <<'EOF'
-phases:
-  - name: prepare-system
+build:
+  prepare-system:
     groups:
       a: ["run mkdir /etc/thing && echo keep > /etc/thing/keep"]
-  - name: features
+  features:
     groups:
       intoDir: ["copy files/thing /etc/thing"]
 EOF
@@ -647,8 +656,8 @@ EOF
 case_isolated_single_group() {
   # A phase with one group without run is merged, not run on the input.
   recipe single <<'EOF'
-phases:
-  - name: features
+build:
+  features:
     groups:
       only: ["copy files/ /etc/only/"]
 EOF
@@ -664,7 +673,7 @@ EOF
 
 all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_isolated
 delete_alone_is_fine allow_identical shared rewrite_counts_as_write serial_phases
-collectors long_form_and_includes expects independent_of_base fallback_symlink
+collectors long_form_and_imports expects independent_of_base fallback_symlink
 fallback_mode fallback_type isolated_single_group tmpfs_mount
 context_excludes_output uki secret_mount stage_from_phase record
 source_date_epoch volatile"

@@ -51,60 +51,14 @@ const DefaultToolbox = "docker.io/library/busybox:1.38.0"
 // Recipe is the fully parsed and schema-validated build description.
 type Recipe struct {
 	Settings Settings
-	Prepare  map[string]Stage // named multistage stages, referenced by `copy --from=<name>`
+	Stages   map[string]Stage // named stages, referenced by `copy --from=<name>` and bind mounts
 	Phases   []Phase
-	// Files are the recipe's own files, entry first, then every included
+	// Files are the recipe's own files, entry first, then every imported
 	// file once, as paths relative to the recipe directory.
 	Files []string
-}
-
-// RecordPhase returns the index of the phase after which the record is
-// added, or -1 when settings.record is false. The record comes right
-// before the first phase that reads the result of an earlier phase (a
-// bind mount or copy from it, or a prepare stage that starts from it):
-// such a phase derives something from the image so far, a unified kernel
-// image with its digest for instance, which must already cover the
-// record. Without such a phase the record comes last. As late as that,
-// a change to the recipe only rebuilds what comes after the record.
-func (r *Recipe) RecordPhase() int {
-	if !r.Settings.Record {
-		return -1
-	}
-	for i := 1; i < len(r.Phases); i++ {
-		if r.readsEarlierPhase(i) {
-			return i - 1
-		}
-	}
-	return len(r.Phases) - 1
-}
-
-func (r *Recipe) readsEarlierPhase(i int) bool {
-	earlier := map[string]bool{}
-	for _, ph := range r.Phases[:i] {
-		earlier[ph.Name] = true
-	}
-	reads := func(from string) bool {
-		if earlier[from] {
-			return true
-		}
-		st, ok := r.Prepare[from]
-		return ok && st.FromPhase != ""
-	}
-	for _, c := range r.Phases[i].Commands() {
-		switch c := c.(type) {
-		case CopyCmd:
-			if c.From != "" && reads(c.From) {
-				return true
-			}
-		case RunCmd:
-			for _, m := range c.Mounts {
-				if m.Type == "bind" && reads(m.From) {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	// Resolved is the recipe with all imports merged, as YAML: what the
+	// image records in its label org.nomira.recipe.
+	Resolved []byte
 }
 
 // ContextPaths returns what the copy commands of the recipe take from the
@@ -131,8 +85,8 @@ func (r *Recipe) ContextPaths() (paths []string, all bool) {
 			}
 		}
 	}
-	for _, name := range sortedStageNames(r.Prepare) {
-		add(r.Prepare[name].Commands)
+	for _, name := range sortedStageNames(r.Stages) {
+		add(r.Stages[name].Commands)
 	}
 	for _, ph := range r.Phases {
 		add(ph.Commands())
@@ -178,8 +132,8 @@ type Settings struct {
 	// (source_date_epoch: false) turns all of that off.
 	SourceDateEpoch *int64
 	EpochOff        bool
-	// Record says whether the recipe itself goes into the image, below
-	// RecordDir (see Recipe.RecordPhase for where).
+	// Record says whether the image carries the resolved recipe in its
+	// label RecipeLabel.
 	Record bool
 	// Volatile are the paths that every run gets as an empty tmpfs:
 	// nothing written there ends up in the image.
@@ -193,11 +147,9 @@ type Settings struct {
 // build-time artifacts; bootc container lint warns about them.
 var DefaultVolatile = []string{"/run", "/tmp", "/var/cache", "/var/log", "/var/tmp"}
 
-// RecordDir is where the image keeps the recipe it was built from: the
-// recipe's files and everything its copy commands take from the build
-// context, at their paths relative to the recipe directory. It is below
-// /usr, so it is part of the verified, read-only image.
-const RecordDir = "/usr/share/nomira/recipe"
+// RecipeLabel is the image label that holds the resolved recipe
+// (Recipe.Resolved).
+const RecipeLabel = "org.nomira.recipe"
 
 // Stage is a named prepare stage with its own base image.
 type Stage struct {

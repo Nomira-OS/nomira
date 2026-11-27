@@ -2,7 +2,8 @@
 #
 # Example: a small system on the nomira base image.
 #
-# Every feature is a group in a file of its own. A group names the packages
+# Every feature is a file of its own, imported below and merged into this
+# recipe; each adds a group to the phase features. A group names the packages
 # and services it needs; the collector phases install and enable them in
 # one step each. The groups themselves only copy files, so they do not see
 # the state before them: a new base image rebuilds the two collectors, not
@@ -10,6 +11,10 @@
 #
 # The package set comes from the base image: its mirrorlist points to the
 # Arch Linux Archive snapshot that belongs to the tag.
+
+imports:
+  - features/terminal.yml
+  - features/network.yml
 
 settings:
   name: mysystem
@@ -20,16 +25,14 @@ settings:
   env:
     LANG: C.UTF-8
 
-phases:
-  - name: packages
+build:
+  packages:
     collect: run --mount=type=cache,target=/var/cache/pacman/pkg pacman -S --needed --noconfirm ${items}
 
-  - name: features
+  features:
     groups:
-      terminal: {include: features/terminal.yml}
-      network: {include: features/network.yml}
       boot:
         - copy files/kargs/ /usr/lib/bootc/kargs.d/
 
-  - name: services
+  services:
     collect: run systemctl enable ${items}

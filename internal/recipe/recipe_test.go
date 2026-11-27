@@ -13,18 +13,18 @@ settings:
   args:
     SNAPSHOT: "2026/11/10"
 
-prepare:
+stages:
   aurbuild:
     from: docker.io/library/archlinux:base-devel
     commands:
       - run pacman -Syu --noconfirm git
 
-phases:
-  - name: base
+build:
+  base:
     groups:
       system:
         - run --mount=type=cache,target=/var/cache/pacman/pkg pacman -Syu --needed --noconfirm kmscon
-  - name: configs
+  configs:
     validation: allow-identical
     shared:
       - /usr/lib/tmpfiles.d/
@@ -83,14 +83,14 @@ func TestBuildArgOverride(t *testing.T) {
 
 func TestParseErrors(t *testing.T) {
 	cases := map[string]string{
-		"unknown verb":       "settings: {base: x}\nphases: [{name: a, groups: {g: ['frobnicate y']}}]",
-		"unknown copy stage": "settings: {base: x}\nphases: [{name: a, groups: {g: ['copy --from=nope /a /b']}}]",
-		"empty phases":       "settings: {base: x}\nphases: []",
-		"missing base":       "settings: {name: x}\nphases: [{name: a, groups: {g: ['run true']}}]",
-		"bad policy":         "settings: {base: x, validation: lax}\nphases: [{name: a, groups: {g: ['run true']}}]",
+		"unknown verb":       "settings: {base: x}\nbuild: {a: {groups: {g: ['frobnicate y']}}}",
+		"unknown copy stage": "settings: {base: x}\nbuild: {a: {groups: {g: ['copy --from=nope /a /b']}}}",
+		"empty phases":       "settings: {base: x}\nbuild: {}",
+		"missing base":       "settings: {name: x}\nbuild: {a: {groups: {g: ['run true']}}}",
+		"bad policy":         "settings: {base: x, validation: lax}\nbuild: {a: {groups: {g: ['run true']}}}",
 		"unknown key":        "settings: {base: x}\nphasen: []",
-		"relative dst":       "settings: {base: x}\nphases: [{name: a, groups: {g: ['copy a b']}}]",
-		"duplicate phase":    "settings: {base: x}\nphases: [{name: a, groups: {g: ['run true']}}, {name: a, groups: {g: ['run true']}}]",
+		"relative dst":       "settings: {base: x}\nbuild: {a: {groups: {g: ['copy a b']}}}",
+		"duplicate phase":    "settings: {base: x}\nbuild: {a: {groups: {g: ['run true']}}, a: {groups: {g: ['run true']}}}",
 	}
 	for name, src := range cases {
 		if _, err := Parse([]byte(src), nil); err == nil {
@@ -115,27 +115,51 @@ func mapReader(files map[string]string) ReadFunc {
 	}
 }
 
-func TestIncludes(t *testing.T) {
+func TestImportsMerge(t *testing.T) {
 	files := map[string]string{
-		"recipe.yml": `
-settings: {base: x}
-prepare:
-  aur:
-    from: y
-    commands: {include: stages/aur.yml}
-phases:
-  - include: phases/base.yml
-  - name: configs
+		"recipe.yml": `# syntax=example/front:1
+imports: [base.yml, machine/laptop.yml]
+settings:
+  name: laptop
+  labels: {owner: me}
+build:
+  features:
     groups:
-      kmscon: {include: groups/kmscon.yml}
-      nm:
-        - copy configs/nm/ /etc/NetworkManager/
+      editor: [run install-editor]
+      network: null
 `,
-		"stages/aur.yml":    "- run make\n",
-		"phases/base.yml":   "- name: base\n  groups:\n    system: {include: ../groups/system.yml}\n- include: extra.yml\n",
-		"phases/extra.yml":  "name: extra\ngroups:\n  g: ['run true']\n",
-		"groups/system.yml": "- run pacman -Syu\n",
-		"groups/kmscon.yml": "- copy files/kmscon/ /etc/kmscon/\n",
+		"base.yml": `imports: [common.yml]
+settings:
+  name: base
+  base: x
+  labels: {tier: base}
+  tags: [a, b]
+stages:
+  aur: {from: y, commands: [run make]}
+build:
+  packages:
+    collect: run pacman -S ${items}
+  features:
+    groups:
+      network: {packages: [networkmanager], commands: [run nm]}
+      ssh: {packages: [openssh]}
+  services:
+    collect: run systemctl enable ${items}
+`,
+		"common.yml": "settings: {toolbox: busybox}\n",
+		"machine/laptop.yml": `settings:
+  tags: [c]
+build:
+  firmware:
+    collect: run pacman -S ${items}
+  packages: {}
+  features:
+    groups:
+      hardware: {firmware: [linux-firmware-intel]}
+  uki:
+    groups:
+      uki: [run make-uki]
+`,
 	}
 	r, err := ParseFile("recipe.yml", mapReader(files), nil)
 	if err != nil {
@@ -145,34 +169,100 @@ phases:
 	for _, p := range r.Phases {
 		names = append(names, p.Name)
 	}
-	if strings.Join(names, ",") != "base,extra,configs" {
-		t.Fatalf("phase order: %v", names)
+	// firmware is first in its file: before packages, the next phase it
+	// names; uki comes after features, its predecessor there.
+	if got := strings.Join(names, " "); got != "firmware packages features uki services" {
+		t.Errorf("phase order: %s", got)
 	}
-	if len(r.Phases[2].Groups["kmscon"].Commands) != 1 || len(r.Prepare["aur"].Commands) != 1 {
-		t.Fatalf("includes not resolved: %+v", r)
+	st := r.Settings
+	if st.Name != "laptop" || st.Base != "x" || st.Toolbox != "busybox" {
+		t.Errorf("settings: %+v", st)
+	}
+	if st.Labels["owner"] != "me" || st.Labels["tier"] != "base" {
+		t.Errorf("labels are merged: %v", st.Labels)
+	}
+	if strings.Join(st.Tags, ",") != "c" {
+		t.Errorf("lists are replaced: %v", st.Tags)
+	}
+	feat := r.Phases[2]
+	if strings.Join(feat.GroupNames(), ",") != "editor,hardware,ssh" {
+		t.Errorf("groups (network removed by null): %v", feat.GroupNames())
+	}
+	if _, ok := r.Stages["aur"]; !ok {
+		t.Error("stage from an import missing")
+	}
+	if got := strings.Join(r.Files, " "); got != "recipe.yml base.yml common.yml machine/laptop.yml" {
+		t.Errorf("files: %s", got)
+	}
+
+	res := string(r.Resolved)
+	if !strings.HasPrefix(res, "# syntax=example/front:1\n") {
+		t.Errorf("resolved starts without the syntax line:\n%s", res)
+	}
+	for _, want := range []string{"from base.yml", "from machine/laptop.yml", "uki:", "linux-firmware-intel"} {
+		if !strings.Contains(res, want) {
+			t.Errorf("resolved lacks %q:\n%s", want, res)
+		}
+	}
+	for _, unwanted := range []string{"imports", "network"} {
+		if strings.Contains(res, unwanted) {
+			t.Errorf("resolved contains %q:\n%s", unwanted, res)
+		}
+	}
+	// The resolved recipe is a recipe: it parses to the same phases.
+	again, err := Parse(r.Resolved, nil)
+	if err != nil {
+		t.Fatalf("resolved does not parse: %v\n%s", err, res)
+	}
+	if len(again.Phases) != len(r.Phases) || string(again.Resolved[strings.Index(string(again.Resolved), "\n")+1:]) == "" {
+		t.Errorf("resolved parses differently")
 	}
 }
 
-func TestIncludeErrors(t *testing.T) {
-	base := "settings: {base: x}\nphases:\n"
+func TestImportErrors(t *testing.T) {
+	head := "settings: {base: x}\nbuild: {a: {groups: {g: [run true]}}}\n"
 	cases := map[string]map[string]string{
-		"cycle": {
-			"recipe.yml": base + "  - include: a.yml\n",
-			"a.yml":      "- include: a.yml\n",
+		"cycle":       {"recipe.yml": "imports: [a.yml]\n" + head, "a.yml": "imports: [recipe.yml]\n"},
+		"escape":      {"recipe.yml": "imports: [../x.yml]\n" + head},
+		"absolute":    {"recipe.yml": "imports: [/etc/x.yml]\n" + head},
+		"missing":     {"recipe.yml": "imports: [nope.yml]\n" + head},
+		"not a list":  {"recipe.yml": "imports: a.yml\n" + head},
+		"unknown key": {"recipe.yml": "imports: [a.yml]\n" + head, "a.yml": "gruppen: {}\n"},
+		"order": {
+			"recipe.yml": "imports: [a.yml, b.yml]\nsettings: {base: x}\n",
+			"a.yml":      "build: {p: {groups: {g: [run a]}}, q: {groups: {g: [run b]}}}\n",
+			"b.yml":      "build: {q: {}, p: {}}\n",
 		},
-		"escape":  {"recipe.yml": base + "  - include: ../x.yml\n"},
-		"missing": {"recipe.yml": base + "  - include: nope.yml\n"},
-		"mixed":   {"recipe.yml": base + "  - include: a.yml\n    name: x\n", "a.yml": "name: a\ngroups: {g: ['run true']}\n"},
-		"unknown key in include": {
-			"recipe.yml": base + "  - include: a.yml\n",
-			"a.yml":      "name: a\ngruppen: {}\n",
-		},
-		"stream": {"recipe.yml": base + "  - include: a.yml\n"},
+		"stream": {"recipe.yml": "imports: [a.yml]\n" + head},
 	}
 	for name, files := range cases {
-		if _, err := ParseFile("recipe.yml", mapReader(files), nil); err == nil {
-			t.Errorf("%s: expected error", name)
+		read := mapReader(files)
+		if name == "stream" {
+			if _, err := Parse([]byte(files["recipe.yml"]), nil); err == nil {
+				t.Errorf("%s: expected error", name)
+			}
+			continue
 		}
+		if _, err := ParseFile("recipe.yml", read, nil); err == nil {
+			t.Errorf("%s: expected error", name)
+		} else if name == "order" && !strings.Contains(err.Error(), "different order") {
+			t.Errorf("order: %v", err)
+		}
+	}
+}
+
+func TestBuildArgsInResolved(t *testing.T) {
+	src := "settings: {base: x, args: {V: '1'}}\nbuild: {a: {groups: {g: ['run echo ${V}']}}}\n"
+	r, err := Parse([]byte(src), map[string]string{"V": "2"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := Parse(r.Resolved, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Settings.Args["V"] != "2" {
+		t.Errorf("override not in the resolved recipe:\n%s", r.Resolved)
 	}
 }
 
@@ -186,8 +276,8 @@ settings:
   platforms: [linux/amd64, linux/arm64]
   tags: ["${V}", stable]
   args: {V: "1.2"}
-phases:
-  - name: a
+build:
+  a:
     env: {MAKEFLAGS: -j4}
     groups:
       g:
@@ -217,11 +307,11 @@ phases:
 	}
 
 	bad := map[string]string{
-		"env name":  "settings: {base: x, env: {'1A': b}}\nphases: [{name: a, groups: {g: ['run true']}}]",
-		"env cmd":   "settings: {base: x}\nphases: [{name: a, groups: {g: ['env NOVALUE']}}]",
-		"platform":  "settings: {base: x, platforms: [amd64]}\nphases: [{name: a, groups: {g: ['run true']}}]",
-		"tag":       "settings: {base: x, tags: ['a:b']}\nphases: [{name: a, groups: {g: ['run true']}}]",
-		"phase env": "settings: {base: x}\nphases: [{name: a, env: {'a-b': c}, groups: {g: ['run true']}}]",
+		"env name":  "settings: {base: x, env: {'1A': b}}\nbuild: {a: {groups: {g: ['run true']}}}",
+		"env cmd":   "settings: {base: x}\nbuild: {a: {groups: {g: ['env NOVALUE']}}}",
+		"platform":  "settings: {base: x, platforms: [amd64]}\nbuild: {a: {groups: {g: ['run true']}}}",
+		"tag":       "settings: {base: x, tags: ['a:b']}\nbuild: {a: {groups: {g: ['run true']}}}",
+		"phase env": "settings: {base: x}\nbuild: {a: {env: {'a-b': c}, groups: {g: ['run true']}}}",
 	}
 	for name, s := range bad {
 		if _, err := Parse([]byte(s), nil); err == nil {
@@ -233,40 +323,43 @@ phases:
 func TestCollectorsAndLongGroups(t *testing.T) {
 	files := map[string]string{
 		"recipe.yml": `
+imports: [features/terminal.yml]
 settings: {base: x}
-prepare:
+stages:
   shared:
     from: y
     commands: ['run true']
-phases:
-  - name: packages
+build:
+  packages:
     collect: run --mount=type=cache,target=/c pacman -S --needed --noconfirm ${items}
-  - name: features
+  features:
     groups:
-      terminal: {include: features/terminal.yml}
       editor:
         packages: [vim, kmscon]
       network:
         - copy files/nm/ /etc/NetworkManager/
-  - name: services
+  services:
     collect: run systemctl enable ${items}
-  - name: unused
+  unused:
     collect: run echo ${items}
 `,
 		"features/terminal.yml": `
-packages: [kmscon]
-services: [kmsconvt@tty1.service]
-expects: [/usr/lib/systemd/system/kmsconvt@.service]
-prepare:
-  theme:
-    from: z
-    commands: {include: theme.yml}
-commands:
-  - copy files/kmscon/ /etc/kmscon/
-  - copy --from=theme /out/theme.conf /etc/kmscon/theme.conf
-  - copy --from=shared /x /y
+build:
+  features:
+    groups:
+      terminal:
+        packages: [kmscon]
+        services: [kmsconvt@tty1.service]
+        expects: [/usr/lib/systemd/system/kmsconvt@.service]
+        stages:
+          theme:
+            from: z
+            commands: [run ./gen-theme.sh]
+        commands:
+          - copy files/kmscon/ /etc/kmscon/
+          - copy --from=theme /out/theme.conf /etc/kmscon/theme.conf
+          - copy --from=shared /x /y
 `,
-		"features/theme.yml": "- run ./gen-theme.sh\n",
 	}
 	r, err := ParseFile("recipe.yml", mapReader(files), nil)
 	if err != nil {
@@ -297,8 +390,8 @@ commands:
 	if from := term.Commands[2].(CopyCmd).From; from != "shared" {
 		t.Errorf("global stage reference: %q", from)
 	}
-	if st, ok := r.Prepare["features/terminal/theme"]; !ok || len(st.Commands) != 1 {
-		t.Errorf("local stage missing: %+v", r.Prepare)
+	if st, ok := r.Stages["features/terminal/theme"]; !ok || len(st.Commands) != 1 {
+		t.Errorf("local stage missing: %+v", r.Stages)
 	}
 	// A group that only contributes builds nothing.
 	if strings.Join(feat.BuildGroupNames(), ",") != "network,terminal" || len(feat.GroupNames()) != 3 {
@@ -310,22 +403,21 @@ commands:
 }
 
 func TestCollectorErrors(t *testing.T) {
-	head := "settings: {base: x}\nphases:\n"
+	head := "settings: {base: x}\nbuild:\n"
 	bad := map[string]string{
-		"no placeholder":       head + "  - {name: p, collect: run pacman -S}\n",
-		"not a run":            head + "  - {name: p, collect: 'copy ${items} /x'}\n  - {name: f, groups: {g: {p: [a]}}}\n",
-		"collect with groups":  head + "  - {name: p, collect: 'run x ${items}', groups: {g: ['run true']}}\n",
-		"reserved name":        head + "  - {name: commands, collect: 'run x ${items}'}\n",
-		"unknown contribution": head + "  - {name: f, groups: {g: {pakages: [a]}}}\n",
-		"item with space":      head + "  - {name: p, collect: 'run x ${items}'}\n  - {name: f, groups: {g: {p: ['a b']}}}\n",
-		"item with shell":      head + "  - {name: p, collect: 'run x ${items}'}\n  - {name: f, groups: {g: {p: ['a;rm']}}}\n",
-		"item is an option":    head + "  - {name: p, collect: 'run x ${items}'}\n  - {name: f, groups: {g: {p: ['--now']}}}\n",
-		"empty group":          head + "  - {name: f, groups: {g: {expects: [/a]}}}\n",
-		"relative expects":     head + "  - {name: f, groups: {g: {expects: [a/b], commands: ['run true']}}}\n",
-		"include plus keys":    head + "  - {name: f, groups: {g: {include: a.yml, expects: [/a]}}}\n",
-		"unknown local stage":  head + "  - {name: f, groups: {g: {commands: ['copy --from=nope /a /b']}}}\n",
-		"args named items":     "settings: {base: x, args: {items: a}}\nphases:\n  - {name: f, groups: {g: ['run true']}}\n",
-		"neither":              head + "  - {name: f}\n",
+		"no placeholder":       head + "  p: {collect: run pacman -S}\n",
+		"not a run":            head + "  p: {collect: 'copy ${items} /x'}\n  f: {groups: {g: {p: [a]}}}\n",
+		"collect with groups":  head + "  p: {collect: 'run x ${items}', groups: {g: ['run true']}}\n",
+		"reserved name":        head + "  commands: {collect: 'run x ${items}'}\n",
+		"unknown contribution": head + "  f: {groups: {g: {pakages: [a]}}}\n",
+		"item with space":      head + "  p: {collect: 'run x ${items}'}\n  f: {groups: {g: {p: ['a b']}}}\n",
+		"item with shell":      head + "  p: {collect: 'run x ${items}'}\n  f: {groups: {g: {p: ['a;rm']}}}\n",
+		"item is an option":    head + "  p: {collect: 'run x ${items}'}\n  f: {groups: {g: {p: ['--now']}}}\n",
+		"empty group":          head + "  f: {groups: {g: {expects: [/a]}}}\n",
+		"relative expects":     head + "  f: {groups: {g: {expects: [a/b], commands: ['run true']}}}\n",
+		"unknown local stage":  head + "  f: {groups: {g: {commands: ['copy --from=nope /a /b']}}}\n",
+		"args named items":     "settings: {base: x, args: {items: a}}\nbuild:\n  f: {groups: {g: ['run true']}}\n",
+		"neither":              head + "  f: {}\n",
 	}
 	for name, s := range bad {
 		if _, err := Parse([]byte(s), nil); err == nil {
@@ -357,16 +449,16 @@ func TestTmpfsMount(t *testing.T) {
 
 func TestBindMountsAndPhaseSources(t *testing.T) {
 	recipe := func(body string) map[string]string {
-		return map[string]string{"recipe.yml": "settings: {base: x}\nprepare:\n  tools:\n    from: y\n    commands: ['run true']\nphases:\n" + body}
+		return map[string]string{"recipe.yml": "settings: {base: x}\nstages:\n  tools:\n    from: y\n    commands: ['run true']\nbuild:\n" + body}
 	}
 	good := recipe(`
-  - name: system
+  system:
     groups:
       a: ['run true']
-  - name: kernel
+  kernel:
     groups:
       k: ['run rm -f /vmlinuz']
-  - name: uki
+  uki:
     groups:
       u:
         - run --mount=type=bind,from=kernel,target=/target --mount=type=bind,from=system,source=/usr/lib/modules,target=/kernels --mount=type=bind,from=tools,target=/t ls /target
@@ -393,30 +485,30 @@ func TestBindMountsAndPhaseSources(t *testing.T) {
 
 	for name, body := range map[string]string{
 		"later phase": `
-  - name: a
+  a:
     groups:
       g: ['run --mount=type=bind,from=b,target=/x true']
-  - name: b
+  b:
     groups:
       g: ['run true']
 `,
 		"own phase": `
-  - name: a
+  a:
     groups:
       g: ['copy --from=a /x /y']
 `,
 		"unknown": `
-  - name: a
+  a:
     groups:
       g: ['run --mount=type=bind,from=nope,target=/x true']
 `,
 		"stage and phase": `
-  - name: tools
+  tools:
     groups:
       g: ['run true']
 `,
 		"bind without from": `
-  - name: a
+  a:
     groups:
       g: ['run --mount=type=bind,target=/x true']
 `,
@@ -452,18 +544,18 @@ func TestStageFromPhase(t *testing.T) {
 	files := func(use string) map[string]string {
 		return map[string]string{"recipe.yml": `
 settings: {base: x}
-prepare:
+stages:
   initramfs:
     from: packages
     commands: ['run true']
-phases:
-  - name: early
+build:
+  early:
     groups:
       g: ['` + use + `']
-  - name: packages
+  packages:
     groups:
       p: ['run true']
-  - name: late
+  late:
     groups:
       g: ['` + use + `']
 `}
@@ -472,8 +564,8 @@ phases:
 		t.Fatal(err)
 	}
 	r, _ := ParseFile("recipe.yml", mapReader(files("run true")), nil)
-	if r.Prepare["initramfs"].FromPhase != "packages" {
-		t.Errorf("FromPhase: %+v", r.Prepare["initramfs"])
+	if r.Stages["initramfs"].FromPhase != "packages" {
+		t.Errorf("FromPhase: %+v", r.Stages["initramfs"])
 	}
 	// Used by a phase before packages: rejected.
 	if _, err := ParseFile("recipe.yml", mapReader(files("run --mount=type=bind,from=initramfs,target=/i true")), nil); err == nil {
@@ -483,7 +575,7 @@ phases:
 
 func TestCompressionAndSecrets(t *testing.T) {
 	parse := func(settings, cmd string) (*Recipe, error) {
-		return ParseFile("recipe.yml", mapReader(map[string]string{"recipe.yml": "settings: {base: x" + settings + "}\nphases:\n  - name: a\n    groups:\n      g: ['" + cmd + "']\n"}), nil)
+		return ParseFile("recipe.yml", mapReader(map[string]string{"recipe.yml": "settings: {base: x" + settings + "}\nbuild:\n  a:\n    groups:\n      g: ['" + cmd + "']\n"}), nil)
 	}
 	r, err := parse("", "run true")
 	if err != nil || r.Settings.Compression != "zstd" {
@@ -501,101 +593,67 @@ func TestCompressionAndSecrets(t *testing.T) {
 	}
 }
 
-func TestRecordAndContext(t *testing.T) {
-	files := map[string]string{
-		"recipe.yml": `
-settings:
-  name: x
-  base: b
-phases:
-  - name: features
+func TestContextPathsAndRecord(t *testing.T) {
+	src := `
+settings: {name: x, base: b}
+build:
+  features:
     groups:
-      a: {include: groups/a.yml}
+      a: ["copy files/a.conf /etc/a.conf", "copy files/b/ /etc/b2/"]
       b: ["copy ./files/b/ /etc/b/"]
-  - name: kernel
-    groups:
-      out: ["run rm /usr/lib/modules/*/vmlinuz"]
-  - name: uki
-    groups:
-      uki: ["run --mount=type=bind,from=kernel,target=/target true"]
-`,
-		"groups/a.yml": "- copy files/a.conf /etc/a.conf\n- copy files/b/ /etc/b2/\n",
-	}
-	read := func(name string) ([]byte, error) {
-		d, ok := files[name]
-		if !ok {
-			return nil, errf("no %s", name)
-		}
-		return []byte(d), nil
-	}
-	r, err := ParseFile("recipe.yml", read, nil)
+`
+	r, err := Parse([]byte(src), nil)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if got := strings.Join(r.Files, " "); got != "recipe.yml groups/a.yml" {
-		t.Errorf("files = %s", got)
 	}
 	paths, all := r.ContextPaths()
 	if all || strings.Join(paths, " ") != "files/a.conf files/b" {
 		t.Errorf("context = %v %v", paths, all)
 	}
-	// Before uki, which reads kernel: after kernel.
-	if got := r.RecordPhase(); got != 1 {
-		t.Errorf("record after phase %d, want 1", got)
+	if !r.Settings.Record {
+		t.Error("record is on by default")
 	}
-
-	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "  base: b\n", "  base: b\n  record: false\n", 1)
-	if r, err = ParseFile("recipe.yml", read, nil); err != nil || r.RecordPhase() != -1 {
+	r, err = Parse([]byte(strings.Replace(src, "base: b", "base: b, record: false", 1)), nil)
+	if err != nil || r.Settings.Record {
 		t.Errorf("record: false: %v", err)
 	}
-	files["recipe.yml"] = strings.Replace(files["recipe.yml"], "record: false", "record: features", 1)
-	if _, err = ParseFile("recipe.yml", read, nil); err == nil {
-		t.Errorf("record: features must be rejected")
-	}
-}
-
-func TestRecordDefaultsToLast(t *testing.T) {
-	r, err := Parse([]byte(sample), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := r.RecordPhase(); got != len(r.Phases)-1 {
-		t.Errorf("record after %d", got)
+	if _, err = Parse([]byte(strings.Replace(src, "base: b", "base: b, record: features", 1)), nil); err == nil {
+		t.Error("record: features must be rejected")
 	}
 }
 
 func TestSourceDateEpochSetting(t *testing.T) {
-	r, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: 1700000000}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	r, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: 1700000000}\nbuild: {p: {groups: {g: [run true]}}}\n"), nil)
 	if err != nil || r.Settings.SourceDateEpoch == nil || *r.Settings.SourceDateEpoch != 1700000000 {
 		t.Fatalf("%v %v", r, err)
 	}
-	_, err = Parse([]byte("settings: {name: x, base: b, env: {SOURCE_DATE_EPOCH: '1'}}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	_, err = Parse([]byte("settings: {name: x, base: b, env: {SOURCE_DATE_EPOCH: '1'}}\nbuild: {p: {groups: {g: [run true]}}}\n"), nil)
 	if err == nil || !strings.Contains(err.Error(), "settings.source_date_epoch") {
 		t.Errorf("env: %v", err)
 	}
 }
 
 func TestSourceDateEpochOff(t *testing.T) {
-	r, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: false}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	r, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: false}\nbuild: {p: {groups: {g: [run true]}}}\n"), nil)
 	if err != nil || !r.Settings.EpochOff || r.Settings.SourceDateEpoch != nil {
 		t.Fatalf("%+v %v", r, err)
 	}
-	if _, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: soon}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil); err == nil {
+	if _, err := Parse([]byte("settings: {name: x, base: b, source_date_epoch: soon}\nbuild: {p: {groups: {g: [run true]}}}\n"), nil); err == nil {
 		t.Error("source_date_epoch: soon must be rejected")
 	}
 }
 
 func TestVolatile(t *testing.T) {
-	r, err := Parse([]byte("settings: {name: x, base: b}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	r, err := Parse([]byte("settings: {name: x, base: b}\nbuild: {p: {groups: {g: [run true]}}}\n"), nil)
 	if err != nil || strings.Join(r.Settings.Volatile, " ") != "/run /tmp /var/cache /var/log /var/tmp" {
 		t.Fatalf("default: %v %v", r.Settings.Volatile, err)
 	}
-	r, err = Parse([]byte("settings: {name: x, base: b, volatile: []}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil)
+	r, err = Parse([]byte("settings: {name: x, base: b, volatile: []}\nbuild: {p: {groups: {g: [run true]}}}\n"), nil)
 	if err != nil || len(r.Settings.Volatile) != 0 {
 		t.Fatalf("empty: %v %v", r.Settings.Volatile, err)
 	}
 	for _, bad := range []string{"/", "var/log", "/var/../log"} {
-		if _, err := Parse([]byte("settings: {name: x, base: b, volatile: ['"+bad+"']}\nphases: [{name: p, groups: {g: [run true]}}]\n"), nil); err == nil {
+		if _, err := Parse([]byte("settings: {name: x, base: b, volatile: ['"+bad+"']}\nbuild: {p: {groups: {g: [run true]}}}\n"), nil); err == nil {
 			t.Errorf("volatile %q must be rejected", bad)
 		}
 	}

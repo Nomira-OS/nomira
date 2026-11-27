@@ -104,7 +104,14 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 		return nil, err
 	}
 
-	cfg, err := imageConfig(base, r.Settings.Description, r.Settings.Labels, epoch)
+	labels := map[string]string{}
+	for k, v := range r.Settings.Labels {
+		labels[k] = v
+	}
+	if r.Settings.Record {
+		labels[recipe.RecipeLabel] = string(r.Resolved)
+	}
+	cfg, err := imageConfig(base, r.Settings.Description, labels, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +137,7 @@ func recipeReader(ctx context.Context, c client.Client) recipe.ReadFunc {
 		src := llb.Local(localDockerfile,
 			llb.IncludePatterns([]string{name}),
 			llb.ExcludePatterns(compile.ContextExcludes),
-			llb.WithCustomName("[recipe] load "+name),
+			llb.WithCustomName("[load] "+name),
 		)
 		def, err := src.Marshal(ctx)
 		if err != nil {
@@ -166,7 +173,7 @@ func dependent(ctx context.Context, c client.Client, r *recipe.Recipe, ph recipe
 	for group, upper := range alone {
 		group, upper := group, upper
 		eg.Go(func() error {
-			st := compile.GuardState(r.Settings.Toolbox, lower, upper, ph.Name, group)
+			st := compile.GuardState(r.Settings.Toolbox, lower, upper, compile.PhaseTag(r, phaseIndex(r, ph.Name)), group)
 			data, err := solveAndRead(ectx, c, st, compile.GuardPath)
 			if err != nil {
 				return fmt.Errorf("phase %q group %q: check independence: %w", ph.Name, group, err)
@@ -282,7 +289,7 @@ func validatePhase(ctx context.Context, c client.Client, r *recipe.Recipe, plan 
 				up := plan.Uppers[g]
 				lower, upper = &plan.Input, &up
 			}
-			st := compile.WriteSetState(r.Settings.Toolbox, lower, upper, plan.Layers[g], plan.Phase.Name, g)
+			st := compile.WriteSetState(r.Settings.Toolbox, lower, upper, plan.Layers[g], compile.PhaseTag(r, phaseIndex(r, plan.Phase.Name)), g)
 			data, err := solveAndRead(ectx, c, st, compile.WritesPath)
 			if err != nil {
 				return fmt.Errorf("phase %q group %q: collect write set: %w", plan.Phase.Name, g, err)
@@ -311,4 +318,13 @@ func validatePhase(ctx context.Context, c client.Client, r *recipe.Recipe, plan 
 func resolveBaseConfig(ctx context.Context, c client.Client, ref string) ([]byte, error) {
 	_, _, cfg, err := c.ResolveImageConfig(ctx, ref, resolveOpt())
 	return cfg, err
+}
+
+func phaseIndex(r *recipe.Recipe, name string) int {
+	for i, ph := range r.Phases {
+		if ph.Name == name {
+			return i
+		}
+	}
+	return 0
 }
