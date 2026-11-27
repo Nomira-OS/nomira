@@ -82,8 +82,8 @@ scripts for files that are already in place, for example `--dbonly`
 with an option to keep hooks and scripts, or path triggers that also
 match NoExtract files. It would make the negation list unnecessary.
 
-**Discuss before building step 3**, once the prototype has numbers:
-file capabilities through `bsdtar --xattrs`,
+**To measure and discuss** now that step 3 is built (each unpacks with
+pacman, so file capabilities and NoExtract are pacman's own):
 what an exec per bucket
 costs in BuildKit, and how many layers bootc and registries handle well
 (Fedora stays at 64 or fewer).
