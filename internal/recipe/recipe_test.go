@@ -480,3 +480,23 @@ phases:
 		t.Error("stage used before its phase: accepted")
 	}
 }
+
+func TestCompressionAndSecrets(t *testing.T) {
+	parse := func(settings, cmd string) (*Recipe, error) {
+		return ParseFile("recipe.yml", mapReader(map[string]string{"recipe.yml": "settings: {base: x" + settings + "}\nphases:\n  - name: a\n    groups:\n      g: ['" + cmd + "']\n"}), nil)
+	}
+	r, err := parse("", "run true")
+	if err != nil || r.Settings.Compression != "zstd" {
+		t.Fatalf("default: %v, %+v", err, r)
+	}
+	if r, err = parse(", compression: uncompressed, secrets: {db.key: /etc/kernel/db.key}", "run --mount=type=secret,id=db.key true"); err != nil ||
+		r.Settings.Compression != "uncompressed" || r.Settings.Secrets["db.key"] != "/etc/kernel/db.key" {
+		t.Fatalf("declared: %v, %+v", err, r)
+	}
+	if _, err := parse(", compression: lz4", "run true"); err == nil {
+		t.Error("compression lz4 accepted")
+	}
+	if _, err := parse("", "run --mount=type=secret,id=db.key true"); err == nil {
+		t.Error("undeclared secret accepted")
+	}
+}

@@ -32,6 +32,7 @@ recipe() {
   {
     printf 'settings:\n  name: e2e\n  base: %s\n' "${RECIPE_BASE:-$BASE}"
     [ -z "$TOOLBOX" ] || printf '  toolbox: %s\n' "$TOOLBOX"
+    [ -z "${RECIPE_SETTINGS:-}" ] || printf '  %s\n' "$RECIPE_SETTINGS"
     cat
   } > "$d/recipe.yml"
 }
@@ -156,7 +157,7 @@ EOF
 }
 
 case_secret_mount() {
-  recipe secret_mount <<'EOF'
+  RECIPE_SETTINGS="secrets: {tok: tok}" recipe secret_mount <<'EOF'
 phases:
   - name: content
     groups:
@@ -168,7 +169,7 @@ EOF
   hasnot secret_mount run/secrets/tok
   # A required secret that is not given fails the build. (A cached step
   # would not notice: the secret is not part of the cache key.)
-  recipe secret_missing <<'EOF'
+  RECIPE_SETTINGS="secrets: {tok: tok}" recipe secret_missing <<'EOF'
 phases:
   - name: content
     groups:

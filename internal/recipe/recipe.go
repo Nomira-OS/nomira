@@ -70,6 +70,12 @@ type Settings struct {
 	// platform BuildKit asks for and never tags anything itself.
 	Platforms []string
 	Tags      []string
+	// Compression and Secrets are for the caller, too: layer compression
+	// of the exported image (zstd, gzip or uncompressed; default zstd), and
+	// for each secret id the file on the build machine that provides it.
+	// They live in the recipe because they shape the result.
+	Compression string
+	Secrets     map[string]string
 }
 
 // Stage is a named prepare stage with its own base image.

@@ -30,6 +30,8 @@ type rawSettings struct {
 	Env         map[string]string `yaml:"env"`
 	Platforms   []string          `yaml:"platforms"`
 	Tags        []string          `yaml:"tags"`
+	Compression string            `yaml:"compression"`
+	Secrets     map[string]string `yaml:"secrets"`
 }
 
 type rawStage struct {
@@ -104,6 +106,8 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 			Env:         expandMap(raw.Settings.Env, args),
 			Platforms:   raw.Settings.Platforms,
 			Tags:        raw.Settings.Tags,
+			Compression: raw.Settings.Compression,
+			Secrets:     expandMap(raw.Settings.Secrets, args),
 		},
 		Prepare: map[string]Stage{},
 	}
@@ -119,6 +123,18 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 		r.Settings.Tags[i] = ExpandArgs(t, args)
 		if r.Settings.Tags[i] == "" || strings.ContainsAny(r.Settings.Tags[i], " /:") {
 			return nil, errf("recipe: settings.tags: %q is not a valid tag", t)
+		}
+	}
+	switch r.Settings.Compression {
+	case "":
+		r.Settings.Compression = "zstd"
+	case "zstd", "gzip", "uncompressed":
+	default:
+		return nil, errf("recipe: settings.compression: %q is not zstd, gzip or uncompressed", r.Settings.Compression)
+	}
+	for id, src := range r.Settings.Secrets {
+		if id == "" || strings.ContainsAny(id, "/ ") || src == "" {
+			return nil, errf("recipe: settings.secrets: %q: expected an id without slashes and a file", id)
 		}
 	}
 	if r.Settings.Base == "" {
@@ -309,7 +325,50 @@ func ParseFile(entry string, read ReadFunc, buildArgs map[string]string) (*Recip
 	if err := linkStagesToPhases(r); err != nil {
 		return nil, err
 	}
+	if err := checkSecrets(r); err != nil {
+		return nil, err
+	}
 	return r, nil
+}
+
+// checkSecrets makes sure every secret a step mounts is declared in
+// settings.secrets, so that the recipe names everything its result
+// depends on.
+func checkSecrets(r *Recipe) error {
+	check := func(where string, cmds []Command) error {
+		for _, c := range cmds {
+			run, ok := c.(RunCmd)
+			if !ok {
+				continue
+			}
+			for _, m := range run.Mounts {
+				if m.Type == "secret" {
+					if _, ok := r.Settings.Secrets[m.ID]; !ok {
+						return errf("%s: secret %q is not declared in settings.secrets", where, m.ID)
+					}
+				}
+			}
+		}
+		return nil
+	}
+	for name, st := range r.Prepare {
+		if err := check("prepare "+name, st.Commands); err != nil {
+			return err
+		}
+	}
+	for _, ph := range r.Phases {
+		if ph.Collect != nil {
+			if err := check("phase "+ph.Name, []Command{*ph.Collect}); err != nil {
+				return err
+			}
+		}
+		for g, grp := range ph.Groups {
+			if err := check("phase "+ph.Name+", group "+g, grp.Commands); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // linkStagesToPhases marks the prepare stages that start from a phase and

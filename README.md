@@ -85,6 +85,9 @@ settings:
     VERSION: "1.0"                          # ${VERSION} in commands; --build-arg overrides
   platforms: [linux/amd64]                  # information for CLI and CI, see below
   tags: ["${VERSION}", stable]              # information for CLI and CI, see below
+  compression: zstd                         # zstd | gzip | uncompressed, see below
+  secrets:                                  # secret id: file on the build machine
+    db.key: /etc/kernel/secureboot/db.key
 
 prepare:                                    # optional named stages (multi-stage)
   aurbuild:
@@ -183,20 +186,25 @@ phases:
           --output "/boot/EFI/Linux/$k.efi"; done
 ```
 
-**Secrets:** `--mount=type=secret,id=ID` makes a file the client passes
-(`buildctl --secret id=ID,src=PATH`) available at `/run/secrets/ID` for
-that one step, for a signing key for instance. It never ends up in a
-layer or in the cache key; `required=true` fails the step when the
-secret is missing.
+**Secrets:** `--mount=type=secret,id=ID` makes a file available at
+`/run/secrets/ID` for that one step, for a signing key for instance. It
+never ends up in a layer or in the cache key; `required=true` fails the
+step when the secret is missing. Every secret a recipe mounts must be
+declared in `settings.secrets` with the file on the build machine that
+provides it (`secrets: {db.key: /etc/kernel/secureboot/db.key}`); the CLI
+passes those files to BuildKit (`buildctl --secret`).
 
 **`run --no-cache`:** The step always runs, even if BuildKit has it in its
 cache. Everything that builds on it then runs again: the rest of its group
 and all following phases. Such steps therefore belong in a `prepare`
 stage, or in a group of their own as late as possible.
 
-**`platforms` and `tags`:** The frontend checks both and reports them
-through `inspect`, but does not act on them. Which architecture is built
-and which tags are published is up to the caller (CLI or CI).
+**`platforms`, `tags`, `compression` and `secrets`:** The frontend checks
+them and reports them through `inspect`; the caller acts on them, since
+BuildKit leaves the platform, the tags, the exporter and the secrets to
+the client. The nomira CLI uses `compression` for the exported layers and
+passes the `secrets` files on; everything that shapes the image is thus
+in the recipe, not in command line flags.
 
 ## Groups
 
