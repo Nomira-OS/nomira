@@ -18,10 +18,14 @@ group.
 
 The plan, in steps that each stand on their own:
 
-1. **Measure** (arch-base `hack/measure-packages.sh`, workflow
-   `measure`) where a collector run spends its time: download,
-   signature checks, unpacking, hooks (dracut above all), diff and
-   export of the layer.
+1. **Measure** where a collector run spends its time: download,
+   signature checks, unpacking with install scripts, hooks, the
+   initramfs (dracut), and diff and export of the layer. Without
+   changing the base image: either a measurement recipe that splits the
+   collector into phases (`pacman -Sw`, `pacman -S --dbonly`, with hooks
+   masked, with all hooks) so that the build output times each part,
+   or `podman run` on the base image with a measuring script mounted
+   in. The export shows in the build output of the full recipe.
 2. **Initramfs only when its inputs change** (base image). One script
    builds it: it fingerprints exactly the paths that Arch's dracut hooks
    trigger on (path, size, mtime), dracut's configuration and files such
