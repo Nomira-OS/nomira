@@ -42,14 +42,21 @@ The plan, in steps that each stand on their own:
    arch-base's `recipes/packages.yml`.
 
    For `then`, `pacman -U --dbonly` is not enough: tried, it writes the
-   database but runs neither hooks nor install scripts. The candidate is
-   an ordinary `pacman -U --overwrite '*'` with `NoExtract = *`: a real
-   transaction, so database, install scripts and hooks are pacman's own,
-   while no file is written again. If that does not hold, a small hook
-   runner in the recipe part takes its place.
+   database but runs neither hooks nor install scripts. What works,
+   tried with cups and its dependencies against a normal install: an
+   ordinary `pacman -U --overwrite '*'` with `NoExtract = *` followed
+   by `!<target>` for every path target of the installed hooks. It is a
+   real transaction, so database, install scripts and hooks are
+   pacman's own (the same six hooks as a normal install, no file
+   missing); only the files hooks trigger on are written again. libalpm
+   skips path triggers for files under NoExtract (hook.c), hence the
+   negations. Modules and firmware stay excluded, so they are not
+   written twice; `then` runs `depmod` and the initramfs script of step
+   2 itself. `each` has to honour the image's own NoExtract lines
+   (documentation, man pages, locales), as pacman would.
 
-To find out before step 3: whether the `NoExtract` transaction behaves
-as expected (hooks, scripts, file capabilities), what an exec per bucket
+To find out before step 3: file capabilities through `bsdtar --xattrs`,
+what an exec per bucket
 costs in BuildKit, and how many layers bootc and registries handle well
 (Fedora stays at 64 or fewer).
 
