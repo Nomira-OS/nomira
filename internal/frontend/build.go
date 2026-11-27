@@ -100,17 +100,13 @@ func Build(ctx context.Context, c client.Client) (*client.Result, error) {
 
 	// The graph is assembled phase by phase, looking at real results on the
 	// way: whether a group without run may be built apart from the state
-	// before it, whether expected paths exist, and whether the groups of a
-	// phase are disjoint. A problem stops the build before anything is
+	// before it, and whether the groups of a phase are independent. A problem stops the build before anything is
 	// merged on top of it or exported.
 	b, err := compile.Compile(r, compile.Hooks{
 		Decide: func(ph recipe.Phase, lower llb.State, alone map[string]llb.State) (map[string]string, error) {
 			return dependent(ctx, c, r, toolbox, ph, lower, alone)
 		},
 		PhaseDone: func(plan compile.PhasePlan) error {
-			if err := checkExpects(ctx, c, plan); err != nil {
-				return err
-			}
 			if !plan.Validate {
 				return nil
 			}
@@ -279,38 +275,6 @@ func guardFindings(out string) []string {
 		}
 	}
 	return res
-}
-
-// checkExpects verifies that the paths the groups of a phase expect exist
-// in the state the phase starts from.
-func checkExpects(ctx context.Context, c client.Client, plan compile.PhasePlan) error {
-	var ref client.Reference
-	var missing []string
-	for _, g := range plan.Phase.GroupNames() {
-		for _, p := range plan.Phase.Groups[g].Expects {
-			if ref == nil {
-				def, err := plan.Input.Marshal(ctx)
-				if err != nil {
-					return err
-				}
-				res, err := c.Solve(ctx, client.SolveRequest{Definition: def.ToPB()})
-				if err != nil {
-					return err
-				}
-				if ref, err = res.SingleRef(); err != nil {
-					return err
-				}
-			}
-			if _, err := ref.StatFile(ctx, client.StatRequest{Path: p}); err != nil {
-				missing = append(missing, fmt.Sprintf("  group %q: %s", g, p))
-			}
-		}
-	}
-	if len(missing) == 0 {
-		return nil
-	}
-	return fmt.Errorf("phase %q: expected paths do not exist in the state the phase starts from:\n%s",
-		plan.Phase.Name, strings.Join(missing, "\n"))
 }
 
 func solveAndRead(ctx context.Context, c client.Client, st llb.State, filename string) ([]byte, error) {

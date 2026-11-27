@@ -20,7 +20,6 @@
 //	      - copy files/nm/ /etc/NetworkManager/
 //	    terminal:                   # long form
 //	      packages: [kmscon]        # contribution to the collector "packages"
-//	      expects: [/usr/lib/systemd/system/kmsconvt@.service]
 //	      commands:
 //	        - copy --from=aurbuild /out/theme.conf /etc/kmscon/theme.conf
 //	    locales:                    # a collector among other groups
@@ -52,7 +51,7 @@ type Recipe struct {
 
 // Settings holds file-level configuration. What only a BuildKit client
 // can decide (platform, image names, exporter options, where secrets come
-// from) is not part of a recipe, see removedSettings.
+// from) is not part of a recipe.
 type Settings struct {
 	Base   string            // base image ref
 	Labels map[string]string // image labels
@@ -89,10 +88,6 @@ type Stage struct {
 // Group is one independent unit of a phase.
 type Group struct {
 	Commands []Command
-	// Expects lists paths that must exist in the state the phase starts
-	// from. They are checked on every build without invalidating the
-	// group's cache.
-	Expects []string
 	// Contribute maps a collector name to the items this group adds to it.
 	Contribute map[string][]string
 	// Collector groups only: the command template with ${items}, and the

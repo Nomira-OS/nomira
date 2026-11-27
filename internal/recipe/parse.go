@@ -49,37 +49,6 @@ const (
 	keyEnv     = "env"
 )
 
-// removed are keys older recipes had, with where they went. A frontend
-// cannot set client options, so a recipe does not either; other keys gave
-// way to simpler ones.
-var removed = map[string]map[string]string{
-	"top": {
-		"phases":  "phases are the keys of build: build: {packages: {collect: …}, features: {…}}",
-		"prepare": "renamed to stages",
-	},
-	"settings": {
-		"compression": "the layer compression is a client option: nomira build --compression, or compression = … in nomira.conf",
-		"secrets":     "where a secret comes from is a client option: nomira build --secret id=ID,src=FILE, or secret = … in nomira.conf; the recipe only mounts it",
-		"tags":        "image names are a client option",
-		"platforms":   "the platform is a client option; the frontend builds the one BuildKit asks for",
-		"name":        "the image name is a client option: nomira build --name, or name = … in nomira.conf",
-		"description": "set the label org.opencontainers.image.description in settings.labels",
-		"validation":  "identical writes are always allowed, all other overlaps are conflicts",
-		"toolbox":     "the image for the checks is built in; tests set it with the build option toolbox",
-		"args":        "use settings.env, or the env command where a value should rerun only the commands after it",
-		"volatile":    "use settings.mounts, e.g. /var/log: type=tmpfs",
-	},
-	"phase": {
-		"groups":     "groups stand directly under the phase now",
-		"validation": "identical writes are always allowed, all other overlaps are conflicts",
-		"shared":     "identical writes are always allowed, all other overlaps are conflicts",
-	},
-	"group": {
-		"stages":  "stages are only at the top of the recipe; an imported file can add its own",
-		"include": "use imports at the top of the recipe",
-	},
-}
-
 // decoder turns the merged document into a Recipe, with the file and line
 // of the offending key in every error.
 type decoder struct {
@@ -95,17 +64,14 @@ func (d *decoder) at(k *yaml.Node) string {
 	return fmt.Sprintf("%s:%d", from[len(from)-1], k.Line)
 }
 
-// keys checks the keys of mapping n against known ones; removed ones get
-// their hint. where names n in messages, key the node that holds n.
-func (d *decoder) keys(n, key *yaml.Node, where, kind string, known ...string) error {
+// keys checks that n is a mapping and, with known, that it has only those
+// keys. where names n in messages, key the node that holds n.
+func (d *decoder) keys(n, key *yaml.Node, where string, known ...string) error {
 	if n.Kind != yaml.MappingNode {
 		return errf("%s: %s: expected a mapping", d.at(key), where)
 	}
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k := n.Content[i]
-		if why, ok := removed[kind][k.Value]; ok {
-			return errf("%s: %s.%s is gone: %s", d.at(k), where, k.Value, why)
-		}
 		if known != nil && !contains(known, k.Value) {
 			return errf("%s: %s: unknown key %q (known: %s)", d.at(k), where, k.Value, strings.Join(known, ", "))
 		}
@@ -148,7 +114,7 @@ func (d *decoder) recipe() (*Recipe, error) {
 	root := d.doc.root
 	rootKey := &yaml.Node{Line: 1}
 	d.doc.from[rootKey] = []string{d.doc.files[0]}
-	if err := d.keys(root, rootKey, "recipe", "top", "settings", "stages", "build"); err != nil {
+	if err := d.keys(root, rootKey, "recipe", "settings", "stages", "build"); err != nil {
 		return nil, err
 	}
 	r := &Recipe{Stages: map[string]Stage{}}
@@ -180,7 +146,7 @@ func (d *decoder) recipe() (*Recipe, error) {
 }
 
 func (d *decoder) settings(key, n *yaml.Node, s *Settings) error {
-	if err := d.keys(n, key, "settings", "settings", "base", "labels", "env", "mounts", "source_date_epoch", "record"); err != nil {
+	if err := d.keys(n, key, "settings", "base", "labels", "env", "mounts", "source_date_epoch", "record"); err != nil {
 		return err
 	}
 	s.Record = true
@@ -262,7 +228,7 @@ func (d *decoder) mounts(key, n *yaml.Node, s *Settings) error {
 }
 
 func (d *decoder) stages(key, n *yaml.Node, r *Recipe) error {
-	if err := d.keys(n, key, "stages", "", nil...); err != nil {
+	if err := d.keys(n, key, "stages"); err != nil {
 		return err
 	}
 	return pairs(n, func(k, v *yaml.Node) error {
@@ -270,7 +236,7 @@ func (d *decoder) stages(key, n *yaml.Node, r *Recipe) error {
 		if k.Value == "context" || strings.Contains(k.Value, "/") {
 			return errf("%s: stage name %q is not allowed", d.at(k), k.Value)
 		}
-		if err := d.keys(v, k, where, "", "from", "commands"); err != nil {
+		if err := d.keys(v, k, where, "from", "commands"); err != nil {
 			return err
 		}
 		var raw struct {
@@ -315,7 +281,6 @@ func (d *decoder) stages(key, n *yaml.Node, r *Recipe) error {
 type rawGroup struct {
 	key        *yaml.Node
 	commands   []string
-	expects    []string
 	contribute map[string][]string
 	collect    string
 }
@@ -324,7 +289,7 @@ type rawGroup struct {
 // the one key of its own; or, with collect, a single collector named
 // after the phase.
 func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
-	if err := d.keys(n, key, "build", "", nil...); err != nil {
+	if err := d.keys(n, key, "build"); err != nil {
 		return err
 	}
 	type rawPhase struct {
@@ -346,13 +311,13 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 		if v.Kind == 0 || isNull(v) {
 			v = &yaml.Node{Kind: yaml.MappingNode}
 		}
-		if err := d.keys(v, k, where, "phase", nil...); err != nil {
+		if err := d.keys(v, k, where); err != nil {
 			return err
 		}
 		rp := rawPhase{key: k, groups: map[string]*rawGroup{}}
 		if indexOf(v, keyCollect) >= 0 {
 			// A phase that is one collector, named after the phase.
-			if err := d.keys(v, k, where, "phase", keyCollect, keyEnv); err != nil {
+			if err := d.keys(v, k, where, keyCollect, keyEnv); err != nil {
 				return err
 			}
 			g := &rawGroup{key: k}
@@ -460,12 +425,6 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 				}
 				grp.Commands = append(grp.Commands, cmd)
 			}
-			for _, e := range rg.expects {
-				if !strings.HasPrefix(e, "/") || path.Clean(e) != strings.TrimSuffix(e, "/") && e != "/" {
-					return errf("%s: expects: %q is not a clean absolute path", where, e)
-				}
-				grp.Expects = append(grp.Expects, path.Clean(e))
-			}
 			for cname, list := range rg.contribute {
 				if collectors[cname] == nil {
 					return errf("%s: unknown key %q: no collector of that name (collectors: %s)", where, cname, collectorNames(collectors))
@@ -522,7 +481,7 @@ func collectorNames(m map[string]*yaml.Node) string {
 }
 
 // group decodes one group: a list of commands, or a mapping with
-// commands, expects, collect and contributions.
+// commands, collect and contributions.
 func (d *decoder) group(k, v *yaml.Node, where string) (*rawGroup, error) {
 	g := &rawGroup{key: k}
 	switch v.Kind {
@@ -532,15 +491,13 @@ func (d *decoder) group(k, v *yaml.Node, where string) (*rawGroup, error) {
 	default:
 		return nil, errf("%s: %s: expected a list of commands or a group mapping", d.at(k), where)
 	}
-	if err := d.keys(v, k, where, "group", nil...); err != nil {
+	if err := d.keys(v, k, where); err != nil {
 		return nil, err
 	}
 	err := pairs(v, func(gk, gv *yaml.Node) error {
 		switch gk.Value {
 		case "commands":
 			return d.decode(gk, gv, where+".commands", &g.commands)
-		case "expects":
-			return d.decode(gk, gv, where+".expects", &g.expects)
 		case keyCollect:
 			return d.decode(gk, gv, where+".collect", &g.collect)
 		case keyEnv:
@@ -559,7 +516,7 @@ func (d *decoder) group(k, v *yaml.Node, where string) (*rawGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	if g.collect != "" && (len(g.commands) > 0 || len(g.expects) > 0 || len(g.contribute) > 0) {
+	if g.collect != "" && (len(g.commands) > 0 || len(g.contribute) > 0) {
 		return nil, errf("%s: %s: a collector has collect and nothing else", d.at(k), where)
 	}
 	if g.collect == "" && len(g.commands) == 0 && len(g.contribute) == 0 {

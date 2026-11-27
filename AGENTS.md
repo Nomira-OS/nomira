@@ -55,7 +55,7 @@ there, not here.
 - **Schema changes** touch five places together: the parser, its tests,
   the README, `schema/recipe.schema.json` and `examples/`. YAML decoding
   is strict; unknown keys are errors, also in imported files, and name
-  the file and line. A removed key gets a hint where it went.
+  the file and line. While in alpha, removed keys are simply unknown.
 - **Client options stay out of the recipe.** What only a BuildKit client
   can set (exporter options, names, platform, where secrets come from) is
   never a recipe key.

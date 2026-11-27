@@ -5,13 +5,20 @@ to be tried on a real machine. Nothing here is a promise of a date.
 
 ## Planned
 
-### Imports from OCI artifacts (frontend)
+### Faster package installs (frontend, base image)
 
-Imports by URL work (see the README). Still open: an OCI artifact,
-pinned by digest (`oci://registry/name@sha256:…`), and how Renovate
-updates the pins of both. Open as well: files that such an import
-copies, which today can only come from the recipe directory (the
-import's own context next to the recipe's).
+The biggest cost in a rebuild today: a collector runs one command with
+all items, so adding one package installs all of them again, from the
+package cache but still unpacked, with every hook and a new initramfs.
+Splitting packages over several collectors in phases one after the other
+helps by hand. Options, after a look at how Fedora Atomic and Arkane
+Linux handle it, are being weighed.
+
+### Base images (base image, docs)
+
+More than one base image, documented side by side: what they share
+(security options, the layout bootc expects) and where they differ.
+arch-base is the first.
 
 ### Secure Boot (frontend, CLI, base image)
 
@@ -27,33 +34,23 @@ import's own context next to the recipe's).
 - Key enrollment: document sbctl, and bootc's automatic enrollment from
   `/usr/lib/bootc/install/secureboot-keys/` in the recipe.
 
-### Image version (frontend or recipes)
+### Imports (frontend)
 
-`bootc status` shows the version label of the image, today the one
-inherited from the Arch Linux image. Recipes can set
-`org.opencontainers.image.version` in `settings.labels`; a sensible
-default is still open.
-
-### More on imports (frontend, CLI)
-
-Imports merge as JSON Merge Patch (see the README). Still open:
-
+- OCI artifacts as imports, pinned by digest
+  (`oci://registry/name@sha256:…`), and Renovate updating the pins of
+  URL and OCI imports.
+- Files that an imported part copies, which today can only come from the
+  recipe directory.
 - Changing one entry of a list (one command of a group, one package)
   without restating the list, in the spirit of kustomize's strategic
   merge patch. Today a list is replaced as a whole.
-- `nomira recipe diff` that shows changes per phase and group rather
-  than as lines.
 
-### Collectors that build on themselves (frontend)
+### Smaller things
 
-A collector runs one command with all items, so adding one package
-installs all of them again: from the package cache, but still unpacked,
-with all hooks, a new initramfs included. Splitting the packages over
-several collectors in phases one after the other (things that rarely
-change first) avoids that by hand. Better: the collector runs once per
-group, in a fixed order, each run on top of the previous one, so a new
-item only reruns the groups after it. Open: the order (by group name, or by phase), and
-removals, which still rebuild from the first changed group.
+- `bootc status` shows the version label inherited from the Arch Linux
+  image; a sensible default for `org.opencontainers.image.version`.
+- `nomira recipe diff` per phase and group rather than per line.
+- Multi-architecture builds; today the platform follows the build host.
 
 ## To be tried on a real machine
 
@@ -73,3 +70,7 @@ removals, which still rebuild from the first changed group.
   and dracut module packages exactly like Arch's own, and nothing else.
 - Builds as a normal user (podman-managed buildkitd) on a development
   machine.
+- Booting without a unified kernel image: kernel and initramfs from
+  `/usr/lib/modules`, as bootc installs them by default.
+- Flatpak on the installed system: `/var/lib/flatpak` and user
+  installations surviving updates.

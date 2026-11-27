@@ -99,29 +99,6 @@ func TestParseErrors(t *testing.T) {
 	}
 }
 
-func TestRemovedKeysExplain(t *testing.T) {
-	cases := map[string]string{
-		"settings: {base: x, compression: zstd}\nbuild: {a: {g: [run true]}}":      "nomira build --compression",
-		"settings: {base: x, secrets: {a: b}}\nbuild: {a: {g: [run true]}}":        "--secret",
-		"settings: {base: x, name: n}\nbuild: {a: {g: [run true]}}":                "nomira.conf",
-		"settings: {base: x, description: d}\nbuild: {a: {g: [run true]}}":         "org.opencontainers.image.description",
-		"settings: {base: x, validation: strict}\nbuild: {a: {g: [run true]}}":     "identical writes",
-		"settings: {base: x, toolbox: busybox}\nbuild: {a: {g: [run true]}}":       "built in",
-		"settings: {base: x, args: {A: b}}\nbuild: {a: {g: [run true]}}":           "env command",
-		"settings: {base: x, volatile: [/x]}\nbuild: {a: {g: [run true]}}":         "settings.mounts",
-		"settings: {base: x}\nbuild: {a: {groups: {g: [run true]}}}":               "directly under the phase",
-		"settings: {base: x}\nbuild: {a: {shared: [/x], g: [run true]}}":           "identical writes",
-		"settings: {base: x}\nbuild: {a: {g: {stages: {}, commands: [run true]}}}": "top of the recipe",
-		"settings: {base: x}\nphases: []":                                          "keys of build",
-	}
-	for src, want := range cases {
-		_, err := Parse([]byte(src))
-		if err == nil || !strings.Contains(err.Error(), "is gone") || !strings.Contains(err.Error(), want) {
-			t.Errorf("%q: %v", src, err)
-		}
-	}
-}
-
 func TestErrorsNameFileAndLine(t *testing.T) {
 	files := map[string]string{
 		"recipe.yml":  "imports: [parts/f.yml]\nsettings: {base: x}\nbuild:\n  a:\n    g: [run true]\n",
@@ -375,7 +352,6 @@ build:
     terminal:
       packages: [kmscon]
       services: [kmsconvt@tty1.service]
-      expects: [/usr/lib/systemd/system/kmsconvt@.service]
       commands:
         - copy files/kmscon/ /etc/kmscon/
         - copy --from=theme /out/theme.conf /etc/kmscon/theme.conf
@@ -407,7 +383,7 @@ build:
 	}
 	feat := r.Phases[1]
 	term := feat.Groups["terminal"]
-	if term.HasRun() || len(term.Commands) != 2 || term.Expects[0] != "/usr/lib/systemd/system/kmsconvt@.service" {
+	if term.HasRun() || len(term.Commands) != 2 {
 		t.Errorf("terminal: %+v", term)
 	}
 	// A group that only contributes builds nothing.
@@ -429,8 +405,7 @@ func TestCollectorErrors(t *testing.T) {
 		"item with space":      head + "  p: {collect: 'run x ${items}'}\n  f: {g: {p: ['a b']}}\n",
 		"item with shell":      head + "  p: {collect: 'run x ${items}'}\n  f: {g: {p: ['a;rm']}}\n",
 		"item is an option":    head + "  p: {collect: 'run x ${items}'}\n  f: {g: {p: ['--now']}}\n",
-		"empty group":          head + "  f: {g: {expects: [/a]}}\n",
-		"relative expects":     head + "  f: {g: {expects: [a/b], commands: ['run true']}}\n",
+		"empty group":          head + "  f: {g: {commands: []}}\n",
 		"neither":              head + "  f: {}\n",
 	}
 	for name, s := range bad {

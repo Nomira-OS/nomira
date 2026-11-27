@@ -485,7 +485,6 @@ stages:
 build:
   features:
     feature:
-      expects: [/etc/alpine-release]
       commands:
         - env GREETING=hello
         - copy --chmod=0600 files/f /etc/feature/f
@@ -554,20 +553,7 @@ build:
     groups:
       a: ["run true"]
 EOF
-  MODE=lint must_fail lint_bad 'recipe: recipe.yml:5: build.content.groups is gone: groups stand directly under the phase now'
-}
-
-case_expects() {
-  recipe expects <<'EOF'
-build:
-  features:
-    a:
-      expects: [/etc/alpine-release, /etc/does-not-exist]
-      commands: ["copy files/f /etc/f"]
-EOF
-  echo f > "$work/expects/files/f"
-  must_fail expects 'group "a": /etc/does-not-exist'
-  notlogged expects 'group "a": /etc/alpine-release'
+  MODE=lint must_fail lint_bad 'recipe: recipe.yml:5: build.content.groups: unknown key "a": no collector of that name'
 }
 
 case_independent_of_base() {
@@ -671,7 +657,7 @@ EOF
 
 all="groups_merge conflict_write conflict_delete conflict_delete_dir conflict_isolated
 delete_alone_is_fine identical rewrite_counts_as_write serial_phases
-collectors long_form_and_imports url_import lint expects independent_of_base
+collectors long_form_and_imports url_import lint independent_of_base
 fallback_symlink fallback_mode fallback_type isolated_single_group tmpfs_mount
 context_excludes_output uki secret_mount record source_date_epoch mounts"
 

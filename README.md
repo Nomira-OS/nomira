@@ -107,7 +107,6 @@ build:                                      # the phases, by name; their order m
       collect: run locale-gen ${items}
     german:                                 # long form
       locales: [de_DE.UTF-8]                # contribution to the collector "locales"
-      expects: [/etc/locale.gen]
       commands:
         - env LC=de_DE.UTF-8
         - run echo "LANG=$LC" > /etc/locale.conf
@@ -222,18 +221,16 @@ compression, `rewrite-timestamp`) and the files behind secrets are
 options of `buildctl`; a frontend cannot set them, so a recipe does not
 name them either. The rule: what has to be a client option does not
 belong in the recipe. The frontend builds for the platform BuildKit asks
-for. A recipe that still has a key that moved out gets an error that says
-where it went.
+for.
 
 ## Groups
 
 A group is written in one of two forms. The short form is a list of
-commands. The long form is a mapping; four keys have a fixed meaning:
+commands. The long form is a mapping; three keys have a fixed meaning:
 
 | Key | Meaning |
 |---|---|
 | `commands` | The list of commands |
-| `expects` | Paths that must exist in the state the phase starts from |
 | `collect` | Makes the group a collector, see below; then it has no other key |
 | `env` | Not allowed: environment is set on the phase or with the `env` command |
 
@@ -243,11 +240,6 @@ group may consist of contributions alone.
 Under a phase, `env` is the phase's environment and every other key is a
 group. A phase with `collect` directly under it is the short form of a
 phase with one collector named after the phase.
-
-**`expects`** is checked on every build, without rebuilding the group.
-It is for groups that override or extend something: if a new base image
-no longer has the unit a drop-in refers to, the build says so instead of
-silently shipping a drop-in for nothing.
 
 ## Collectors
 
@@ -525,7 +517,7 @@ Tests come in three layers:
 - `hack/e2e.sh` builds small recipes with a real BuildKit and checks the
   results: conflicts between writes and deletions, identical writes,
   collectors, imports by path and URL, mounts, lint and resolve,
-  `expects`, that a group without `run` comes from the cache after a
+  that a group without `run` comes from the cache after a
   change of the base image, and that the fallback keeps symbolic links
   and directory modes intact. CI runs it on every push; the header of
   the script says what it needs to run locally.

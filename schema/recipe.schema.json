@@ -121,17 +121,12 @@
           "properties": {"collect": {"$ref": "#/$defs/collect"}}
         },
         {
-          "description": "Long form: commands, expects, and contributions to collectors (every other key).",
+          "description": "Long form: commands, and contributions to collectors (every other key).",
           "type": "object",
           "minProperties": 1,
           "not": {"anyOf": [{"required": ["collect"]}, {"required": ["env"]}]},
           "properties": {
-            "commands": {"$ref": "#/$defs/commands"},
-            "expects": {
-              "description": "Paths that must exist in the state the phase starts from.",
-              "type": "array",
-              "items": {"type": "string", "pattern": "^/"}
-            }
+            "commands": {"$ref": "#/$defs/commands"}
           },
           "additionalProperties": {
             "description": "Items for the collector of this name.",
