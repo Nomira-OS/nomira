@@ -26,15 +26,9 @@ The plan, in steps that each stand on their own:
    masked, with all hooks) so that the build output times each part,
    or `podman run` on the base image with a measuring script mounted
    in. The export shows in the build output of the full recipe.
-2. **Initramfs only when its inputs change** (base image). One script
-   builds it: it fingerprints exactly the paths that Arch's dracut hooks
-   trigger on (path, size, mtime), dracut's configuration and files such
-   as `/etc/vconsole.conf`, and takes an initramfs for the same
-   fingerprint from a cache mount instead of running dracut. The pacman
-   hook stays and calls the script, so a recipe without anything else
-   still gets a correct initramfs; a recipe part `initramfs.yml` runs it
-   once more late, before `lint` and `uki`, for configuration copied by
-   the recipe. Needs documentation of the base image.
+2. **Initramfs only when its inputs change**: done in arch-base
+   (`/usr/lib/nomira/initramfs`, `recipes/initramfs.yml`); to be tried
+   in a real build.
 3. **Collectors that fan out** (frontend, generic). A collector with
    `resolve`, `each` and `then`, without a tool image of its own:
    `resolve` runs on the state before the phase and prints the files to
