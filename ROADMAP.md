@@ -18,7 +18,8 @@ group.
 
 The plan, in steps that each stand on their own:
 
-1. **Measure** where a collector run spends its time: download,
+1. **Measure** (arch-base `hack/measure-packages.sh`, workflow
+   `measure`) where a collector run spends its time: download,
    signature checks, unpacking, hooks (dracut above all), diff and
    export of the layer.
 2. **Initramfs only when its inputs change** (base image). One script
@@ -55,7 +56,13 @@ The plan, in steps that each stand on their own:
    2 itself. `each` has to honour the image's own NoExtract lines
    (documentation, man pages, locales), as pacman would.
 
-To find out before step 3: file capabilities through `bsdtar --xattrs`,
+Upstream, a feature request to pacman: running hooks and install
+scripts for files that are already in place, for example `--dbonly`
+with an option to keep hooks and scripts, or path triggers that also
+match NoExtract files. It would make the negation list unnecessary.
+
+**Discuss before building step 3**, once the prototype has numbers:
+file capabilities through `bsdtar --xattrs`,
 what an exec per bucket
 costs in BuildKit, and how many layers bootc and registries handle well
 (Fedora stays at 64 or fewer).
