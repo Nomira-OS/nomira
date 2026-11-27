@@ -214,7 +214,19 @@ EOF
     --output type=oci,dest="$d/img.tar",compression=gzip,rewrite-timestamp=true \
     --progress=plain > "$d/log" 2>&1 || { fail "oci export failed"; tail -n 20 "$d/log"; return 0; }
   mkdir "$d/img" && tar -xf "$d/img.tar" -C "$d/img"
-  got="$(python3 "$(dirname "$0")/oci-times.py" "$d/img")"
+  # Plain tools only: the CI runs this script in the BuildKit image. The
+  # first digest in the index is the manifest's, in the manifest the
+  # config's comes first and the last layer's last; Go writes the keys of
+  # the config sorted, so its first "created" is the image's.
+  blob() { echo "$d/img/blobs/sha256/${1#sha256:}"; }
+  digests() { grep -o '"digest": *"sha256:[0-9a-f]*"' "$1" | grep -o 'sha256:[0-9a-f]*'; }
+  manifest="$(blob "$(digests "$d/img/index.json" | head -n 1)")"
+  config="$(blob "$(digests "$manifest" | head -n 1)")"
+  layer="$(blob "$(digests "$manifest" | tail -n 1)")"
+  created="$(grep -o '"created": *"[^"]*"' "$config" | head -n 1 | sed 's/.*: *"//; s/"$//')"
+  mkdir "$d/layer" && tar -xzf "$layer" -C "$d/layer"
+  newest="$(find "$d/layer" -type f -exec stat -c %Y {} + | sort -n | tail -n 1)"
+  got="$created $newest"
   [ "$got" = "1970-01-01T00:20:34Z 1234" ] || fail "creation time and newest file in the last layer: $got"
 }
 
