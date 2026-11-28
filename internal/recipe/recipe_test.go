@@ -574,7 +574,7 @@ build:
     collect:
       resolve: run pacman -Sp ${items}
       each: run pacman --root /nomira/out -U /nomira/in/*
-      then: run pacman -U /nomira/in/*
+      then: run pacman -U /nomira/in/* && pacman -D --asexplicit ${items}
   features:
     a: {packages: [vim, curl]}
 `)
@@ -582,7 +582,7 @@ build:
 	if g.Fanout == nil || !g.IsCollector() || !g.HasRun() || !g.Builds() {
 		t.Fatalf("group: %+v", g)
 	}
-	if g.Fanout.Resolve.Script != "pacman -Sp curl vim" || g.Fanout.Each.Script == "" || g.Fanout.Then.Script == "" || len(g.Commands) != 0 {
+	if g.Fanout.Resolve.Script != "pacman -Sp curl vim" || g.Fanout.Each.Script == "" || g.Fanout.Then.Script != "pacman -U /nomira/in/* && pacman -D --asexplicit curl vim" || len(g.Commands) != 0 {
 		t.Errorf("fanout: %+v", g.Fanout)
 	}
 	none := parse(t, "settings: {base: x}\nbuild: {p: {collect: {resolve: 'run r ${items}', each: 'run e'}}}\n")

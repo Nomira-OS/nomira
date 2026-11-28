@@ -449,8 +449,10 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 					if part.key == "resolve" && !strings.Contains(line, itemsRef) {
 						return errf("%s: collect.resolve must contain %s", where, itemsRef)
 					}
-					if part.key != "resolve" && strings.Contains(line, itemsRef) {
-						return errf("%s: collect.%s: %s is only for resolve", where, part.key, itemsRef)
+					// each runs per bucket and must not depend on all items,
+					// or every bucket would run again when one item changes.
+					if part.key == "each" && strings.Contains(line, itemsRef) {
+						return errf("%s: collect.each: %s is only for resolve and then", where, itemsRef)
 					}
 					cmd, err := ParseCommand(line)
 					if err != nil {
@@ -515,6 +517,8 @@ func (d *decoder) build(key, n *yaml.Node, r *Recipe) error {
 					f := *grp.Fanout
 					f.Resolve.Script = strings.ReplaceAll(f.Resolve.Script, itemsRef, strings.Join(list, " "))
 					f.Resolve.raw = strings.ReplaceAll(f.Resolve.raw, itemsRef, strings.Join(list, " "))
+					f.Then.Script = strings.ReplaceAll(f.Then.Script, itemsRef, strings.Join(list, " "))
+					f.Then.raw = strings.ReplaceAll(f.Then.raw, itemsRef, strings.Join(list, " "))
 					grp.Fanout = &f
 				}
 			} else if len(list) > 0 {

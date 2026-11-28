@@ -318,7 +318,10 @@ Merge(S, buckets…) ─ then ─→ result of the collector
 - **Buckets must not overlap:** a file in two buckets is a conflict,
   even when it is the same, and stops the build.
 - **then** runs on the merged result with all files in `/nomira/in`, to
-  finish: a package database, install scripts, hooks. Optional.
+  finish: a package database, install scripts, hooks. Optional. It may
+  use `${items}` too, to tell what was asked for from what came along
+  as a dependency; `each` may not, since every bucket would then run
+  again when one item changes.
 
 The frontend knows no package manager: what the three commands do is up
 to the recipe, and a base image can offer them as a part to import.
