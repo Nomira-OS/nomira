@@ -30,30 +30,35 @@ The plan, in steps that each stand on their own:
    (`/usr/lib/nomira/initramfs`, `recipes/initramfs.yml`); to be tried
    in a real build.
 3. **Collectors that fan out**: in the frontend and in arch-base's
-   `packages.yml`; to be measured in a real build. The design: A collector with
-   `resolve`, `each` and `then`, without a tool image of its own:
-   `resolve` runs on the state before the phase and prints the files to
-   fetch (name, URL, sha256); BuildKit downloads them, cached by URL and
-   checksum; `each` unpacks a bucket of them on the unchanged base image
-   into a layer of its own, so its cache depends only on the base image
-   and the packages; the frontend merges the layers, with the conflict
-   check between buckets; `then` finishes on the merged system. The
-   frontend learns no package manager; the pacman side lives in
-   arch-base's `recipes/packages.yml`.
+   `packages.yml`; to be measured in a real build. The design: a collector with
+   `resolve`, `each` and `then`, without a tool image of its own, all on
+   the state `S` where the collector stands: `resolve` prints the files
+   to fetch (name, URL, sha256); BuildKit downloads them, cached by their
+   checksum; `each` unpacks a bucket of them into a layer of its own, so
+   its cache depends only on `S` and the bucket's packages; the frontend
+   merges the layers, with the conflict check between buckets; `then`
+   finishes on the merged system. The frontend learns no package
+   manager; the pacman side lives in arch-base's `recipes/packages.yml`.
 
    For `then`, `pacman -U --dbonly` is not enough: tried, it writes the
    database but runs neither hooks nor install scripts. What works,
    tried with cups and its dependencies against a normal install: an
    ordinary `pacman -U --overwrite '*'` with `NoExtract = *` followed
-   by `!<target>` for every path target of the installed hooks. It is a
-   real transaction, so database, install scripts and hooks are
-   pacman's own (the same six hooks as a normal install, no file
-   missing); only the files hooks trigger on are written again. libalpm
-   skips path triggers for files under NoExtract (hook.c), hence the
-   negations. Modules and firmware stay excluded, so they are not
-   written twice; `then` runs `depmod` and the initramfs script of step
-   2 itself. `each` has to honour the image's own NoExtract lines
-   (documentation, man pages, locales), as pacman would.
+   by a negation for what the hooks in effect trigger on. It is a real
+   transaction, so database, install scripts and hooks are pacman's own.
+   libalpm skips path triggers for files under NoExtract (hook.c), hence
+   the negations. A hook without `NeedsTargets` needs one matching path,
+   so its target `usr/share/fonts/*` is negated as the directory
+   `usr/share/fonts/`, which every package with fonts lists; only
+   `NeedsTargets` hooks get their targets as they are. No font, firmware
+   file or module is written twice, and depmod and the initramfs run as
+   their own hooks. In `each` no hook runs: libalpm looks for hooks below
+   `--root`, so a bucket's own hooks would run in a system that holds
+   only that bucket; their files stay under NoExtract during the
+   transaction and are unpacked afterwards. Both tried with pacman 6.0.2
+   and packages made for the test, against a normal install: the same
+   hooks with the same targets, the same files. The base image leaves
+   NoExtract open, so packages are whole unless a recipe says otherwise.
 
 Buckets: a package's bucket is a function of its key alone (rendezvous
 hashing over the bucket numbers), never of the other packages, their
@@ -73,6 +78,36 @@ well. Later: the number of buckets configurable, and more distribution
 logics as options: xattrs in the manner of chunkah's `user.component`,
 packages above a size of their own, frequency hints.
 
+**Reusing layers without a local cache** (CLI; to discuss). On the
+machine that built the last image, BuildKit's cache already limits a
+rebuild to the buckets whose packages changed, plus `then`. A fresh
+machine or a CI runner starts from nothing. BuildKit can import its
+cache from elsewhere: `--export-cache type=registry,ref=…,mode=max`
+stores, next to the image, which layer every step's cache key gave, and
+`--import-cache` on another machine then reuses every bucket whose key
+matches (the same `S`, the same packages by sha256) and runs only the
+rest. That is the metadata in the registry, and it needs no knowledge of
+packages: the sha256 of the files is the key. As client options:
+`nomira build --cache-from/--cache-to`, a registry or a directory
+(`type=local`). Open: where the cache lives for a machine's own
+recipe, and whether `rewrite-timestamp` and cache export work together
+(to try). The inline cache inside the image works only with BuildKit's
+image exporter, not with the OCI directory the CLI writes.
+
+`then` stays one transaction over all packages: database, install
+scripts and hooks for everything, whenever any bucket changed. Running
+it only for the changed packages would mean building on the previous
+image, so the result would depend on the build history instead of the
+recipe, or replacing pacman's own handling of database, scripts and
+hooks. rpm-ostree does the same as nomira here: it caches the unpacked
+packages (pkgcache) and runs the scripts over the whole tree on every
+compose; it skips a compose only when nothing changed, as BuildKit's
+cache does. What makes `then` cheap is writing little; to be measured.
+
+Smaller: `then` installs with `pacman -U`, which marks every package as
+explicitly installed, dependencies too; `pacman -D --asdeps` for the
+packages that no item named would restore the install reasons.
+
 Done: the conflict check as a build option (`--opt check=off`, `nomira build
 --no-check`), on by default: faster builds for who accepts that groups
 or buckets that overlap are merged in a fixed order without a word.
@@ -83,9 +118,10 @@ with an option to keep hooks and scripts, or path triggers that also
 match NoExtract files. It would make the negation list unnecessary.
 
 **To measure and discuss** now that step 3 is built (each unpacks with
-pacman, so file capabilities and NoExtract are pacman's own):
-what an exec per bucket
-costs in BuildKit, and how many layers bootc and registries handle well
+pacman, so file capabilities and NoExtract are pacman's own), with
+`podman run` on the base image: what `then` costs against a normal
+install, what an exec per bucket costs in BuildKit, the export with
+`rewrite-timestamp`, and how many layers bootc and registries handle well
 (Fedora stays at 64 or fewer).
 
 ### Configuration defaults in /etc (base image, CLI, docs)
