@@ -524,6 +524,14 @@ Options the frontend takes (`--opt`):
 | `toolbox` | The busybox image the checks run in; default `docker.io/library/busybox:1.38.0` |
 | `check` | `on` (default) or `off`: the conflict checks between groups and between buckets. Off is faster and merges overlapping groups in a fixed order without a word |
 
+Caches that buildctl imports (`--import-cache`) are passed on to every
+solve of the frontend, so steps whose inputs are unchanged come from
+there: from an image's own inline cache (`--export-cache type=inline`,
+also with the `oci` exporter and `rewrite-timestamp=true`), a registry
+cache or a local directory. A collector that fans out then takes every
+unchanged bucket from the import; `then`, which needs all files, runs
+and downloads them.
+
 The result is an ordinary OCI image, for podman for instance:
 
 ```sh

@@ -45,6 +45,10 @@ const (
 
 // Build is the gateway entrypoint (grpcclient.RunFromEnvironment target).
 func Build(ctx context.Context, c client.Client) (*client.Result, error) {
+	c, err := withCacheImports(c)
+	if err != nil {
+		return nil, err
+	}
 	opts := c.BuildOpts().Opts
 
 	filename := opts[keyFilename]
