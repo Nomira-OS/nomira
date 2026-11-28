@@ -78,21 +78,13 @@ well. Later: the number of buckets configurable, and more distribution
 logics as options: xattrs in the manner of chunkah's `user.component`,
 packages above a size of their own, frequency hints.
 
-**Reusing layers without a local cache** (CLI; to discuss). On the
-machine that built the last image, BuildKit's cache already limits a
-rebuild to the buckets whose packages changed, plus `then`. A fresh
-machine or a CI runner starts from nothing. BuildKit can import its
-cache from elsewhere: `--export-cache type=registry,ref=…,mode=max`
-stores, next to the image, which layer every step's cache key gave, and
-`--import-cache` on another machine then reuses every bucket whose key
-matches (the same `S`, the same packages by sha256) and runs only the
-rest. That is the metadata in the registry, and it needs no knowledge of
-packages: the sha256 of the files is the key. As client options:
-`nomira build --cache-from/--cache-to`, a registry or a directory
-(`type=local`). Open: where the cache lives for a machine's own
-recipe, and whether `rewrite-timestamp` and cache export work together
-(to try). The inline cache inside the image works only with BuildKit's
-image exporter, not with the OCI directory the CLI writes.
+**Reusing layers without a local cache**: done. The frontend passes
+caches the client imports on to every solve, and `nomira build` writes
+an inline cache into every image and imports it from the last published
+image and from `--cache-from` images. Tried with all local cache pruned:
+unchanged buckets come from the import, only the changed bucket and
+`then` run; `then` needs every package and downloads them. Still open:
+the cost of the import on a large image, to measure with the rest.
 
 `then` stays one transaction over all packages: database, install
 scripts and hooks for everything, whenever any bucket changed. Running
@@ -104,9 +96,12 @@ packages (pkgcache) and runs the scripts over the whole tree on every
 compose; it skips a compose only when nothing changed, as BuildKit's
 cache does. What makes `then` cheap is writing little; to be measured.
 
-Smaller: `then` installs with `pacman -U`, which marks every package as
-explicitly installed, dependencies too; `pacman -D --asdeps` for the
-packages that no item named would restore the install reasons.
+Done as well: `then` marks the packages no item named as dependencies,
+as `pacman -S` would; it gets the items for that. Packages the system
+has in another version are upgraded in a transaction of their own,
+since an upgrade under NoExtract would lose their files, and `each`
+checks a bucket against the system as pacman would without
+`--overwrite`.
 
 Done: the conflict check as a build option (`--opt check=off`, `nomira build
 --no-check`), on by default: faster builds for who accepts that groups
