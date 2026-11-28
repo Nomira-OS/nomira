@@ -96,12 +96,14 @@ packages (pkgcache) and runs the scripts over the whole tree on every
 compose; it skips a compose only when nothing changed, as BuildKit's
 cache does. What makes `then` cheap is writing little; to be measured.
 
-Done as well: `then` marks the packages no item named as dependencies,
-as `pacman -S` would; it gets the items for that. Packages the system
-has in another version are upgraded in a transaction of their own,
-since an upgrade under NoExtract would lose their files, and `each`
+Done as well: `then` installs with `pacman -Su --needed` from the
+downloaded files as its cache, so pacman checks every signature (keyring
+in a tmpfs, signatures from the sync database) and sets the install
+reasons itself; an update is laid over its old files in its bucket and
+upgraded in the same transaction (NoUpgrade next to NoExtract); `each`
 checks a bucket against the system as pacman would without
-`--overwrite`.
+`--overwrite`; `packages-live.yml` installs and updates from the live
+repositories.
 
 Done: the conflict check as a build option (`--opt check=off`, `nomira build
 --no-check`), on by default: faster builds for who accepts that groups
